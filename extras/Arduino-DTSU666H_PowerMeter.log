@@ -1,0 +1,16 @@
+START ../src/Arduino-DTSU666H_PowerMeter.cpp
+Version 1.0 from Sep 19 2023_
+If you connect periodically print pin A4 to ground, Serial plotter data is printed every 2000 ms
+Power correction + pin is 5
+Power correction - pin is 4
+LCD data is printed every (8 * 80) ms
+Reference line, which can be negative is 2
+Line, with 6.6 ms delay is 1
+Line, with 13.3 ms delay is 3
+Waiting for requests to ID MODBUS_SLAVE_ADDR with _9600_ baud at pin RX. Reply / TX is on pin 2
+First waiting for voltage at line2
+Power correction is 100 %
+
+Size of Data + BSS, Heap start, Stack end=1932
+Stack used 116 of 116
+Currently available Heap=0
