@@ -2,7 +2,7 @@
 
 # [Arduino Nano substitute for a DTSU666-H power meter](https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter)
 
-Substitutes the RS485 modbus service of DTSU-H 3 phase power meter for a Deye hybrid inverter.<br/>
+Substitutes the RS485 modbus service of DTSU-H coil based 3 phase power meter for usage with a Deye hybrid inverter.<br/>
 On phase L1 it reads every 4. current waves, on phase L2 and L3 it reads only every 8. half wave.<br/>
 
 [![Badge License: GPLv3](https://img.shields.io/badge/License-GPLv3-brightgreen.svg)](https://www.gnu.org/licenses/gpl-3.0)
@@ -20,10 +20,13 @@ On phase L1 it reads every 4. current waves, on phase L2 and L3 it reads only ev
 
 #### If you find this program useful, please give it a star.
 
+&#x1F30E; [Google Translate](https://translate.google.com/translate?sl=en&u=https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter)
+
 <br/>
 
 # Features
 - Astonishing accuracy of 1% at my site.
+- Every watt-hour, the build-in LED flashes for 80 ms.
 - 2 buttons to set a correction percentage other than 100% - which was not required at my site :-).
 - Display of Power, Energy, Time for energy and correction percentage on a locally attached 1602 LCD.
 - Page button for switching 4 LCD display pages.
@@ -46,13 +49,12 @@ On phase L1 it reads every 4. current waves, on phase L2 and L3 it reads only ev
 7. After 40 ms do 20 ms phase A current measurement, which will also cover negative current. Multiply values with voltage.
 8. 20 ms for math and reply to RS485 or output to LCD until starting again at 80 ms - x ms.
 
-The Deye sends a 9600 baud modbus request 01 03  15 1E  00 06  A1 C2 every 100 ms to 120 ms.<br/>
+The Deye inverter sends a 9600 baud modbus request 01 03  15 1E  00 06  A1 C2 every 100 ms to 120 ms.<br/>
 We send the reply at pin 2 with software serial at a 80 ms raster.<br/>
 This means, around every 400 ms we have one loop where we do not need to reply and can update the LCD instead.<br/>
 Sometimes the Deye sends the request, while we do a reply.
 
 <br/>
-
 
 # Pictures
 
@@ -87,7 +89,7 @@ Sometimes the Deye sends the request, while we do a reply.
 
 
 ```
- Implemented with 3 30A split-core current transformers.
+ Implemented with 3 x 30A split-core current transformers.
  2. order low pass 1600 Hz, to suppressthe high frequency modulation of current as seen above.
                ____         ____         _____
           o---|____|---o---|____|---o---|_____|---o-----> A1 (A2, A3)
@@ -170,7 +172,13 @@ This program uses the following libraries, which are already included in this re
 # Tested Inverter
 - SUN-5K-SG05LP1-EU
 
+# Useful Links
+- [Modbus registers map](https://www.aggsoft.com/serial-data-logger/tutorials/modbus-data-logging/chint-instrument-dsu666-dtsu666.htm)
+
 # Revision History
+
+### Version 1.1
+- Added reply to 0x2014 (Power in 0.1 W units) and 0x0006 (Current transformer rate IrAt).
 
 ### Version 1.0
 - Initial version.

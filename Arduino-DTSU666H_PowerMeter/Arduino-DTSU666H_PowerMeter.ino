@@ -9,9 +9,9 @@
  *  Copyright (C) 2023  Armin Joachimsmeyer
  *  Email: armin.joachimsmeyer@gmail.com
  *
- *  This file is part of Mains3PhaseSimplePowerMeter https://github.com/ArminJo/Mains3PhaseSimplePowerMeter.
+ *  This file is part of Arduino-DTSU666H_PowerMeter https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter.
  *
- *  Mains3PhaseSimplePowerMeter is free software: you can redistribute it and/or modify
+ *  Arduino-DTSU666H_PowerMeter is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
  *  the Free Software Foundation, either version 3 of the License, or
  *  (at your option) any later version.
@@ -26,31 +26,33 @@
  */
 
 /*
- * We assume, that voltage waveform of the 3 phases are equal and negative and positive values are symmetric, so we take only one half wave as voltage reference.
+ * We assume, that voltage waveform of the 3 phases are equal and negative and positive values are symmetric
+ * so we take only one half wave as voltage reference.
  *
- * Phase A (L1) is reference (the one, which supplies the voltage and which can be negative), phase B has a delay of 6.6 ms / 120 degree and C a delay of 13.3 ms / 240 degree.
- * Read "positive" part voltage values of phase A for 10 ms and store 385 values in RAM to be used as reference for all 3 phases.
- * This starts 16 Bit timer 1 to keep track of the phase for the next current measurements.
- * Wait 3.3 ms.
- * After 10 + 3.333 ms do 10 ms phase C current measurement. Multiply values with voltage.
- * Wait 3.3 ms.
- * After 20 + 6.666 ms do 10 ms phase B current measurement. Multiply values with voltage.
- * Wait 3.3 ms
- * After 40 ms do 20 ms phase A current measurement, which will also cover negative current. Multiply values with voltage.
+ * Phase A (L1) is reference (the one, which supplies the voltage and which can be negative),
+ *   phase B has a delay of 6.6 ms / 120 degree and C a delay of 13.3 ms / 240 degree.
  *
- * 20 ms for math and reply to RS485 or output to LCD until starting again at 80 ms - x ms.
+ * 1. Read "positive" part voltage values of phase A for 10 ms and store 385 values in RAM to be used as reference for all 3 phases.
+ *    This starts 16 Bit timer 1 to keep track of the phase for the next current measurements.
+ * 2. Wait 3.3 ms.
+ * 3. After 10 + 3.333 ms do 10 ms phase C current measurement. Multiply values with voltage.
+ * 4. Wait 3.3 ms.
+ * 5. After 20 + 6.666 ms do 10 ms phase B current measurement. Multiply values with voltage.
+ * 6. Wait 3.3 ms
+ * 7. After 40 ms do 20 ms phase A current measurement, which will also cover negative current. Multiply values with voltage.
+ * 8. 20 ms for math and reply to RS485 or output to LCD until starting again at 80 ms - x ms.
  *
- * Different timing for covering negative values of all 3 phases:
+ * Alternative timing for covering negative values of all 3 phases:
  * 13.3 | phase C | 20 ms, 40 | phase A | 20 ms, 66.6 phase B | 20 ms, 100 | voltage phase A | 113.3 ...
  *
- * The Deye sends a 9600 baud modbus request 01 03  15 1E  00 06  A1 C2 every 100 ms to 120 ms.
+ * The Deye inverter sends a 9600 baud modbus request 01 03  15 1E  00 06  A1 C2 every 100 ms to 120 ms.
  * We send the reply at pin 2 with software serial at a 80 ms raster.
  * This means, around every 400 ms we have one loop where we do not need to reply and can update the LCD instead.
  * Sometimes the Deye sends the request, while we do a reply.
  */
 
 /*
- * Every watt-hour the build-in LED flashes for 80 ms (a complete measurement loop).
+ * Every watt-hour, the build-in LED flashes for 80 ms (a complete measurement loop).
  *
  * There are 4 LCD pages
  * Power    Power in watt
@@ -87,11 +89,18 @@
 /*
  * Modbus stuff
  */
-#define MODBUS_BAUDRATE                      9600
-#define MODBUS_REQUEST_LENGTH                   8
-#define MODBUS_REPLY_LENGTH                     17
+#define MODBUS_BAUDRATE              9600
+#define MODBUS_REQUEST_LENGTH           8
+#define MODBUS_REPLY_POWER_LENGTH      17
+#define MODBUS_REPLY_ONE_WORD_LENGTH    7
+#define MODBUS_ID_INDEX                 0
+#define MODBUS_FUNCTION_INDEX           1
+#define MODBUS_REQUEST_ADDRESS_INDEX    2
+#define MODBUS_REQUEST_NUMBER_INDEX     4
+#define MODBUS_REPLY_LENGTH_INDEX       2
+#define MODBUS_REPLY_DATA_INDEX         3
 uint8_t sRequestBuffer[MODBUS_REQUEST_LENGTH];
-uint8_t sReplyBuffer[MODBUS_REPLY_LENGTH] = { 0x01, 0x03, 0x0C };
+uint8_t sReplyBuffer[MODBUS_REPLY_POWER_LENGTH] = { 0x01, 0x03 };
 bool checkAndReplyToModbusRequest();
 uint16_t calculateCrc(uint8_t *aBuffer, uint16_t aBufferLength);
 
@@ -161,10 +170,10 @@ SoftwareSerialTX TxToModbusClient(MODBUS_TX_PIN);
 
 /*
  * For power data acquisition
- * for LCD we accumulate 4 periods, so we have an overflow above around 8 kW
+ * for LCD we accumulate up to 10 periods, so we have an overflow above around 3.2 kW if we use int16_t
  */
-uint8_t sNumberOfPowerSamplesForLCD;
-int16_t sPowerForLCDAccumulator[3];     // Index 0 is for L1, 1 is for L2 at ADC channel 2 etc.
+uint8_t sNumberOfPowerSamplesForLCD;    //
+int32_t sPowerForLCDAccumulator[3];     // Index 0 is for L1, 1 is for L2 at ADC channel 2 etc. We can have up to 10 samples
 uint8_t sNumberOfPowerSamplesForModbus;
 int32_t sPowerForModbusAccumulator[3];  // Index 0 is for L1, 1 is for L2 at ADC channel 2 etc.
 
@@ -226,6 +235,8 @@ volatile uint8_t sLCDDisplayPage = POWER_METER_PAGE_POWER;
 #define NO_BUTTON_RELEASE_CALLBACK  // Disables the code for release callback. This saves 2 bytes RAM and 64 bytes program memory.
 
 #include "EasyButtonAtInt01.hpp"
+#define LONG_PRESS_BUTTON_DURATION_MILLIS   1000
+
 void handlePageButtonPress(bool aButtonToggleState __attribute__((unused))) {
     sPageButtonJustPressed = true;
     if (!digitalReadFast(ENABLE_ARDUINO_PLOTTER_OUTPUT_PIN)) {
@@ -332,10 +343,10 @@ void setup() {
         /*
          * TEST
          */
-        uint16_t tCRC = calculateCrc(sReplyBuffer, MODBUS_REPLY_LENGTH - 2);
-        sReplyBuffer[MODBUS_REPLY_LENGTH - 2] = tCRC >> 8;
-        sReplyBuffer[MODBUS_REPLY_LENGTH - 1] = tCRC;
-        TxToModbusClient.write(sReplyBuffer, MODBUS_REPLY_LENGTH); // 17 ms
+        uint16_t tCRC = calculateCrc(sReplyBuffer, MODBUS_REPLY_POWER_LENGTH - 2);
+        sReplyBuffer[MODBUS_REPLY_POWER_LENGTH - 2] = tCRC >> 8;
+        sReplyBuffer[MODBUS_REPLY_POWER_LENGTH - 1] = tCRC;
+        TxToModbusClient.write(sReplyBuffer, MODBUS_REPLY_POWER_LENGTH); // 17 ms
     } else {
         Serial.begin(115200);
         Serial.println();
@@ -399,8 +410,12 @@ void loop() {
     OCR1A = OCR1A + (2 * 13333); // set next compare to 13333 us after last compare. Timer has a resolution of 0.5 us.
     TIFR1 = _BV(OCF1A);  // Clear all timer compare flags
     // Store values for with 13.3 ms delay now
-    tPowerRaw /= 100; // To avoid 32 bit overflow in next computation
-    int16_t tPower = ((tPowerRaw * sPowerCorrectionPercentage) + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
+    int16_t tPower;
+    if (sPowerCorrectionPercentage == 100) {
+        tPower = (tPowerRaw + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
+    } else {
+        tPower = (((tPowerRaw / 100) * sPowerCorrectionPercentage) + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
+    }
 
     sPowerForLCDAccumulator[LINE_WITH_13_MS_DELAY - 1] += tPower;
     sPowerForModbusAccumulator[LINE_WITH_13_MS_DELAY - 1] += tPower;
@@ -419,8 +434,11 @@ void loop() {
     TIFR1 = _BV(OCF1A);  // Clear all timer compare flags
 
     // Store values for line with 6.6 ms delay now
-    tPowerRaw /= 100; // To avoid 32 bit overflow in next computation
-    tPower = ((tPowerRaw * sPowerCorrectionPercentage) + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
+    if (sPowerCorrectionPercentage == 100) {
+        tPower = (tPowerRaw + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
+    } else {
+        tPower = (((tPowerRaw / 100) * sPowerCorrectionPercentage) + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
+    }
 
     sPowerForLCDAccumulator[LINE_WITH_7_MS_DELAY - 1] += tPower;
     sPowerForModbusAccumulator[LINE_WITH_7_MS_DELAY - 1] += tPower;
@@ -456,8 +474,11 @@ void loop() {
     /*
      * Computing and slow actions
      */
-    tPowerRaw /= 100; // To avoid 32 bit overflow in next computation
-    tPower = ((tPowerRaw * sPowerCorrectionPercentage) + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
+    if (sPowerCorrectionPercentage == 100) {
+        tPower = (tPowerRaw + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
+    } else {
+        tPower = (((tPowerRaw / 100) * sPowerCorrectionPercentage) + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
+    }
 
     sPowerForLCDAccumulator[LINE_WHICH_CAN_BE_NEGATIVE - 1] += tPower;
     sPowerForModbusAccumulator[LINE_WHICH_CAN_BE_NEGATIVE - 1] += tPower;
@@ -493,7 +514,7 @@ void loop() {
      * Enable fast response to button press
      */
     if (!checkAndReplyToModbusRequest() || sPageButtonJustPressed) {
-        if (!(PageButtonAtPin3.ButtonStateIsActive && sLCDDisplayPage == POWER_METER_PAGE_INFO)) {
+        if (!(PageButtonAtPin3.readDebouncedButtonState() && sLCDDisplayPage == POWER_METER_PAGE_INFO)) {
             /*
              * Here no long press at page Energy!
              * If no reply was sent -which took 18 ms-, we have time to print on LCD which takes 3.4 ms
@@ -507,8 +528,8 @@ void loop() {
         }
     }
 
-    if (PageButtonAtPin3.ButtonStateIsActive && sLCDDisplayPage == POWER_METER_PAGE_INFO
-            && PageButtonAtPin3.checkForLongPress(1000) == EASY_BUTTON_LONG_PRESS_DETECTED) {
+    if (sLCDDisplayPage == POWER_METER_PAGE_INFO
+            && PageButtonAtPin3.checkForLongPress(LONG_PRESS_BUTTON_DURATION_MILLIS) == EASY_BUTTON_LONG_PRESS_DETECTED) {
         /*
          * Long press detected at page Energy.
          * Reset power to 0
@@ -627,6 +648,11 @@ void printCorrectionPercentageOnLCD() {
     myLCD.print(F("% "));
 }
 
+void print6DigitsWatt(int aWattToPrint) {
+    sprintf_P(sStringBufferForLCDRow, PSTR("%6d W"), aWattToPrint); // force use of 6 columns
+    myLCD.print(sStringBufferForLCDRow);
+}
+
 /*
  * 11 ms. 6 ms with delayMicroseconds(40); and 3.4 ms with delayMicroseconds(2) instead of delayMicroseconds(100);   // commands need > 37us to settle
  * Called every MILLISECONDS_BETWEEN_LCD_OUTPUT (320 ms)
@@ -636,21 +662,18 @@ void printDataOnLCD() {
 
     if (sLCDDisplayPage == POWER_METER_PAGE_POWER) {
         if (sNumberOfPowerSamplesForLCD > 0) {
-            int16_t tPowerL1 = sPowerForLCDAccumulator[0] / sNumberOfPowerSamplesForLCD;
-            int16_t tPowerL2 = sPowerForLCDAccumulator[1] / sNumberOfPowerSamplesForLCD;
-            sprintf_P(sStringBufferForLCDRow, PSTR("%6d W%6d W"), tPowerL1, tPowerL2); // force use of 6 columns
-            myLCD.print(sStringBufferForLCDRow);
+            print6DigitsWatt(sPowerForLCDAccumulator[0] / sNumberOfPowerSamplesForLCD);
+            print6DigitsWatt(sPowerForLCDAccumulator[1] / sNumberOfPowerSamplesForLCD);
 
-            int16_t tPowerL3 = sPowerForLCDAccumulator[2] / sNumberOfPowerSamplesForLCD;
-            if (sCounterForDisplayFreeze == 0) {
-                int16_t tPowerSum = tPowerL1 + tPowerL2 + tPowerL3;
-                sprintf_P(sStringBufferForLCDRow, PSTR("%6d W%6d W"), tPowerL3, tPowerSum); // force use of 6 columns
-            } else {
-                sprintf_P(sStringBufferForLCDRow, PSTR("%6dW "), tPowerL3); // left 8 character for message
-            }
             myLCD.setCursor(0, 1);
-            myLCD.print(sStringBufferForLCDRow);
+            print6DigitsWatt(sPowerForLCDAccumulator[2] / sNumberOfPowerSamplesForLCD);
+            if (sCounterForDisplayFreeze == 0) {
+                int16_t tPowerSum = (sPowerForLCDAccumulator[0] + sPowerForLCDAccumulator[1]
+                        + sPowerForLCDAccumulator[2] / sNumberOfPowerSamplesForLCD);
+                print6DigitsWatt(tPowerSum);
+            }
 
+            // Clear accumulator after printing
             sNumberOfPowerSamplesForLCD = 0;
             sPowerForLCDAccumulator[0] = 0;
             sPowerForLCDAccumulator[1] = 0;
@@ -658,6 +681,9 @@ void printDataOnLCD() {
         }
 
     } else if (sLCDDisplayPage == POWER_METER_PAGE_ENERGY) {
+        /*
+         * ENERGY_DIVISOR is 45000 so we have only 16 bit resolution after division
+         */
         int16_t tEnergyL1 = sEnergyAccumulator[0] / ENERGY_DIVISOR;
         int16_t tEnergyL2 = sEnergyAccumulator[1] / ENERGY_DIVISOR;
         sprintf_P(sStringBufferForLCDRow, PSTR("%6dWh%6dWh"), tEnergyL1, tEnergyL2); // force use of 6 columns
@@ -819,10 +845,89 @@ void printPaddedHexOnMyLCD(uint8_t aHexByteValue) {
     myLCD.print(aHexByteValue, HEX);
 }
 
+void replyCurrentTransformerRatio() {
+    uint8_t sReplyBufferIndex = MODBUS_REPLY_LENGTH_INDEX;
+    sReplyBuffer[sReplyBufferIndex++] = 2; // Length of 1 word
+    sReplyBuffer[sReplyBufferIndex++] = 0;
+    sReplyBuffer[sReplyBufferIndex++] = 40; // Assume CurrentTransformerRatio as 40 (for CT's of 200A/5A ?)
+//    sReplyBuffer[sReplyBufferIndex++] = 0x00; // CRC is constant here
+//    sReplyBuffer[sReplyBufferIndex++] = 0x00;
+
+    uint16_t tCRC = calculateCrc(sReplyBuffer, MODBUS_REPLY_ONE_WORD_LENGTH - 2);
+    Serial.print(F("CRC=0x"));
+    Serial.println(tCRC, HEX);
+    sReplyBuffer[MODBUS_REPLY_ONE_WORD_LENGTH - 2] = tCRC >> 8;
+    sReplyBuffer[MODBUS_REPLY_ONE_WORD_LENGTH - 1] = tCRC;
+    TxToModbusClient.write(sReplyBuffer, MODBUS_REPLY_ONE_WORD_LENGTH); // blocking write of 18 ms
+}
+
+/*
+ * Deye Request frame 8 ms every 100 ms -> Reply frame 18 ms
+ * 01 03  20 14  00 06  8E 0C -> 01 03 0C  00 00 00 00  00 00 00 00  00 00 00 00  CRCH CRCL
+ * At address 20 14 DTSU666 sends float power values in 0.1 W units
+ */
+void replyPower0Point1W() {
+    LongUnion tPower;
+    uint8_t sReplyBufferIndex = MODBUS_REPLY_LENGTH_INDEX;
+    sReplyBuffer[sReplyBufferIndex++] = 12; // Length of 3 float values
+
+    for (uint_fast8_t i = 0; i < 3; ++i) {
+        /*
+         * Convert to little endian float and copy it to big endian buffer
+         */
+        tPower.Float = (float) ((sPowerForModbusAccumulator[i] / sNumberOfPowerSamplesForModbus));
+        tPower.Float *= 10; // At address 20 14 DTSU666 sends float power values in 0.1 W units
+        // reverse bytes. We must send MSB . . LSB
+        for (int_fast8_t j = 3; j >= 0; j--) {
+            sReplyBuffer[sReplyBufferIndex++] = tPower.UBytes[j];
+        }
+    }
+    uint16_t tCRC = calculateCrc(sReplyBuffer, MODBUS_REPLY_POWER_LENGTH - 2);
+    //            Serial.print(F("CRC=0x"));
+    //            Serial.println(tCRC, HEX);
+    sReplyBuffer[MODBUS_REPLY_POWER_LENGTH - 2] = tCRC >> 8;
+    sReplyBuffer[MODBUS_REPLY_POWER_LENGTH - 1] = tCRC;
+    TxToModbusClient.write(sReplyBuffer, MODBUS_REPLY_POWER_LENGTH); // blocking write of 18 ms
+    sNumberOfPowerSamplesForModbus = 0;
+    sPowerForModbusAccumulator[0] = 0;
+    sPowerForModbusAccumulator[1] = 0;
+    sPowerForModbusAccumulator[2] = 0;
+}
+
 /*
  * Deye Request frame 8 ms every 100 ms -> Reply frame 18 ms
  * 01 03  15 1E  00 06  A1 C2 -> 01 03 0C  00 00 00 00  00 00 00 00  00 00 00 00  93 70
  * At address 15 1E Deye expects float power values in kW units
+ */
+void replyPower() {
+    LongUnion tPower;
+    uint8_t sReplyBufferIndex = MODBUS_REPLY_LENGTH_INDEX;
+    sReplyBuffer[sReplyBufferIndex++] = 12; // Length of 3 float values
+
+    for (uint_fast8_t i = 0; i < 3; ++i) {
+        /*
+         * Convert to little endian float and copy it to big endian buffer
+         */
+        tPower.Float = (float) ((sPowerForModbusAccumulator[i] / sNumberOfPowerSamplesForModbus));
+        tPower.Float /= 1000; // At address 15 1E Deye expects float power values in kW units
+        // reverse bytes. We must send MSB . . LSB
+        for (int_fast8_t j = 3; j >= 0; j--) {
+            sReplyBuffer[sReplyBufferIndex++] = tPower.UBytes[j];
+        }
+    }
+    uint16_t tCRC = calculateCrc(sReplyBuffer, MODBUS_REPLY_POWER_LENGTH - 2);
+    //            Serial.print(F("CRC=0x"));
+    //            Serial.println(tCRC, HEX);
+    sReplyBuffer[MODBUS_REPLY_POWER_LENGTH - 2] = tCRC >> 8;
+    sReplyBuffer[MODBUS_REPLY_POWER_LENGTH - 1] = tCRC;
+    TxToModbusClient.write(sReplyBuffer, MODBUS_REPLY_POWER_LENGTH); // blocking write of 18 ms
+    sNumberOfPowerSamplesForModbus = 0;
+    sPowerForModbusAccumulator[0] = 0;
+    sPowerForModbusAccumulator[1] = 0;
+    sPowerForModbusAccumulator[2] = 0;
+}
+/*
+ * Deye Request frame 8 ms every 100 ms -> Reply frame 18 ms
  * @return true, if reply was sent (which took 18ms)
  */
 bool checkAndReplyToModbusRequest() {
@@ -838,16 +943,31 @@ bool checkAndReplyToModbusRequest() {
                 Serial.read();
             }
         } else {
-            if (!(sRequestBuffer[0] == 1 && sRequestBuffer[2] == 0x15 && sRequestBuffer[3] == 0x1E)) {
+            if (sRequestBuffer[MODBUS_ID_INDEX] == 1 && sRequestBuffer[MODBUS_REQUEST_ADDRESS_INDEX] == 0x15
+                    && sRequestBuffer[MODBUS_REQUEST_ADDRESS_INDEX + 1] == 0x1E) {
+                replyPower();
+
+            } else if (sRequestBuffer[MODBUS_ID_INDEX] == 1 && sRequestBuffer[MODBUS_REQUEST_ADDRESS_INDEX] == 0x00
+                    && sRequestBuffer[MODBUS_REQUEST_ADDRESS_INDEX + 1] == 0x06) {
+                replyCurrentTransformerRatio();
+                return true;
+
+            } else if (sRequestBuffer[MODBUS_ID_INDEX] == 1 && sRequestBuffer[MODBUS_REQUEST_ADDRESS_INDEX] == 0x20
+                    && sRequestBuffer[MODBUS_REQUEST_ADDRESS_INDEX + 1] == 0x14) {
+                replyPower0Point1W();
+                return true;
+
+            } else {
                 /*
                  * incorrect request of right length
-                 * I have seen 0x3E instead of 0x1E
+                 * I have seen 0x3E and 0xFE instead of 0x1E
+                 * -> Show error, but send power anyway
                  */
                 myLCD.setCursor(8, 1);
-                printPaddedHexOnMyLCD(sRequestBuffer[0]);
-                printPaddedHexOnMyLCD(sRequestBuffer[1]);
-                printPaddedHexOnMyLCD(sRequestBuffer[2]);
-                printPaddedHexOnMyLCD(sRequestBuffer[3]);
+                printPaddedHexOnMyLCD(sRequestBuffer[MODBUS_ID_INDEX]);
+                printPaddedHexOnMyLCD(sRequestBuffer[MODBUS_FUNCTION_INDEX]);
+                printPaddedHexOnMyLCD(sRequestBuffer[MODBUS_REQUEST_ADDRESS_INDEX]);
+                printPaddedHexOnMyLCD(sRequestBuffer[MODBUS_REQUEST_ADDRESS_INDEX + 1]);
 
 //                Serial.begin(115200);
 //                Serial.print(F("Unexpected request"));
@@ -860,33 +980,8 @@ bool checkAndReplyToModbusRequest() {
 //                Serial.begin(MODBUS_BAUDRATE);
 
                 sCounterForDisplayFreeze = 1440; // 12 per second => 1440 is 2 minutes
-
+                replyPower();
             }
-            LongUnion tPower;
-            uint8_t sReplyBufferIndex = 3;
-            for (uint_fast8_t i = 0; i < 3; ++i) {
-                /*
-                 * Convert to little endian float and copy it to big endian buffer
-                 */
-                tPower.Float = (float) (sPowerForModbusAccumulator[i] / sNumberOfPowerSamplesForModbus);
-                tPower.Float /= 1000; // At address 15 1E Deye expects float power values in kW units
-                // reverse bytes. We must send LSB . . MSB
-                for (int_fast8_t j = 3; j >= 0; j--) {
-                    sReplyBuffer[sReplyBufferIndex++] = tPower.UBytes[j];
-                }
-            }
-            uint16_t tCRC = calculateCrc(sReplyBuffer, MODBUS_REPLY_LENGTH - 2);
-//            Serial.print(F("CRC=0x"));
-//            Serial.println(tCRC, HEX);
-            sReplyBuffer[MODBUS_REPLY_LENGTH - 2] = tCRC >> 8;
-            sReplyBuffer[MODBUS_REPLY_LENGTH - 1] = tCRC;
-
-            TxToModbusClient.write(sReplyBuffer, MODBUS_REPLY_LENGTH); // blocking write of 18 ms
-
-            sNumberOfPowerSamplesForModbus = 0;
-            sPowerForModbusAccumulator[0] = 0;
-            sPowerForModbusAccumulator[1] = 0;
-            sPowerForModbusAccumulator[2] = 0;
             return true;
         }
     }
