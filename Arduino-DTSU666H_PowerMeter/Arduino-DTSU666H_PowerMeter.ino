@@ -745,7 +745,7 @@ void printDataOnLCD() {
             print6DigitsWatt(sPowerForLCDAccumulator[2] / sNumberOfPowerSamplesForLCD);
             if (sCounterForDisplayFreeze == 0) {
                 int16_t tPowerSum = (sPowerForLCDAccumulator[0] + sPowerForLCDAccumulator[1]
-                        + sPowerForLCDAccumulator[2] / sNumberOfPowerSamplesForLCD);
+                        + sPowerForLCDAccumulator[2]) / sNumberOfPowerSamplesForLCD;
                 print6DigitsWatt(tPowerSum);
             }
 
@@ -1062,10 +1062,11 @@ bool checkAndReplyToModbusRequest() {
                     && sModbusRTURequestUnion.ModbusRTURequest.FunctionCode == 3) {
 
                 uint16_t tAddress = swap(sModbusRTURequestUnion.ModbusRTURequest.FirstRegisterAddress);
+                uint16_t tCRC = swap(sModbusRTURequestUnion.ModbusRTURequest.CRC);
+                uint16_t tReplyLength = swap(sModbusRTURequestUnion.ModbusRTURequest.ReplyLengthInWord);
                 if (tAddress == 0x151E) {
                     // check other fields of request
-                    if (sModbusRTURequestUnion.ModbusRTURequest.ReplyLengthInWord == 6
-                            && sModbusRTURequestUnion.ModbusRTURequest.CRC == 0xA1C2) {
+                    if (tReplyLength == 6 && tCRC == 0xA1C2) {
                         replyPower();
                         return true;
                     }

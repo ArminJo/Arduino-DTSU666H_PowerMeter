@@ -171,8 +171,8 @@ uint16_t readADCChannelWithOversample(uint8_t aADCChannelNumber, uint8_t aOversa
 void setADCChannelAndReferenceForNextConversion(uint8_t aADCChannelNumber, uint8_t aReference);
 uint16_t readADCChannelWithReferenceOversampleFast(uint8_t aADCChannelNumber, uint8_t aReference, uint8_t aOversampleExponent);
 uint32_t readADCChannelMultiSamples(uint8_t aPrescale, uint16_t aNumberOfSamples);
-uint16_t readADCChannelWithReferenceMultiSamples(uint8_t aADCChannelNumber, uint8_t aReference, uint8_t aNumberOfSamples);
-uint32_t readADCChannelWithReferenceAndPrescalerMultiSamples(uint8_t aADCChannelNumber, uint8_t aReference, uint8_t aPrescale,
+uint16_t readADCChannelMultiSamplesWithReference(uint8_t aADCChannelNumber, uint8_t aReference, uint8_t aNumberOfSamples);
+uint32_t readADCChannelMultiSamplesWithReferenceAndPrescaler(uint8_t aADCChannelNumber, uint8_t aReference, uint8_t aPrescale,
         uint16_t aNumberOfSamples);
 uint16_t readADCChannelWithReferenceMax(uint8_t aADCChannelNumber, uint8_t aReference, uint16_t aNumberOfSamples);
 uint16_t readADCChannelWithReferenceMaxMicros(uint8_t aADCChannelNumber, uint8_t aReference, uint16_t aMicrosecondsToAquire);
