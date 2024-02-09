@@ -6,7 +6,7 @@
  *  Measuring is done with an Arduino Nano and 3 30A CT's.
  *
  *
- *  Copyright (C) 2023  Armin Joachimsmeyer
+ *  Copyright (C) 2023-2024  Armin Joachimsmeyer
  *  Email: armin.joachimsmeyer@gmail.com
  *
  *  This file is part of Arduino-DTSU666H_PowerMeter https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter.
@@ -25,6 +25,8 @@
  *  along with this program. If not, see <http://www.gnu.org/licenses/gpl.html>.
  */
 
+// https://www.ni.com/en/shop/seamlessly-connect-to-third-party-devices-and-supervisory-system/the-modbus-protocol-in-depth.html
+// https://ipc2u.de/artikel/wissenswertes/modbus-rtu-einfach-gemacht-mit-detaillierten-beschreibungen-und-beispielen/
 /*
  * We assume, that voltage waveform of the 3 phases are equal and negative and positive values are symmetric
  * so we take only one half wave as voltage reference.
@@ -71,8 +73,9 @@
 #include "digitalWriteFast.h"
 #include "LongUnion.h"
 #include "LiquidCrystal.h"
+#include <avr/wdt.h>
 
-#define VERSION_EXAMPLE "1.0"
+#define VERSION_EXAMPLE "1.1"
 
 /*
  * Mapping of power phase A, B, C to ADC channels 1, 2, 3, which is also the internal index and display and modbus position.
@@ -89,18 +92,62 @@
 /*
  * Modbus stuff
  */
-#define MODBUS_BAUDRATE              9600
-#define MODBUS_REQUEST_LENGTH           8
-#define MODBUS_REPLY_POWER_LENGTH      17
-#define MODBUS_REPLY_ONE_WORD_LENGTH    7
-#define MODBUS_ID_INDEX                 0
-#define MODBUS_FUNCTION_INDEX           1
-#define MODBUS_REQUEST_ADDRESS_INDEX    2
-#define MODBUS_REQUEST_NUMBER_INDEX     4
-#define MODBUS_REPLY_LENGTH_INDEX       2
-#define MODBUS_REPLY_DATA_INDEX         3
-uint8_t sRequestBuffer[MODBUS_REQUEST_LENGTH];
-uint8_t sReplyBuffer[MODBUS_REPLY_POWER_LENGTH] = { 0x01, 0x03 };
+struct ModbusRTURequestStruct {
+    uint8_t SlaveAddress;
+    uint8_t FunctionCode; // 03 -> Read Multiple Registers
+    uint16_t FirstRegisterAddress; // high byte is sent first
+    uint16_t ReplyLengthInWord;
+    uint16_t CRC; // CRC-16-MODBUS x^16 + x^15 + x^2 + 1
+};
+
+#define MODBUS_REQUEST_LENGTH           (sizeof(ModbusRTURequestStruct)) // 8
+
+union ModbusRTURequestUnion {
+    uint8_t ReceiveByteBuffer[MODBUS_REQUEST_LENGTH];
+    ModbusRTURequestStruct ModbusRTURequest;
+};
+ModbusRTURequestUnion sModbusRTURequestUnion;
+
+struct ModbusRTUMinimalReplyStruct {
+    uint8_t SlaveAddress;
+    uint8_t FunctionCode; // 03 -> Read Multiple Registers
+    uint8_t ReplyByteLength;
+    uint16_t SwappedFirstRegisterContent; // high byte was sent first
+    uint16_t CRC; // CRC-16-MODBUS x^16 + x^15 + x^2 + 1
+};
+#define MODBUS_REPLY_ONE_WORD_LENGTH    (sizeof(ModbusRTUMinimalReplyStruct))
+
+struct ModbusRTU3FloatReplyStruct {
+    uint8_t SlaveAddress;
+    uint8_t FunctionCode; // 03 -> Read Multiple Registers
+    uint8_t ReplyByteLength;
+    float SwappedRegisterContent[3]; // high byte was sent first
+    uint16_t CRC; // CRC-16-MODBUS x^16 + x^15 + x^2 + 1
+};
+#if defined SUPPORT_SOFAR_EXTENSIONS
+struct ModbusRTU6FloatReplyStruct {
+    uint8_t SlaveAddress;
+    uint8_t FunctionCode; // 03 -> Read Multiple Registers
+    uint8_t ReplyByteLength;
+    float SwappedRegisterContent[6]; // high byte was sent first
+    uint16_t CRC; // CRC-16-MODBUS x^16 + x^15 + x^2 + 1
+};
+#define MODBUS_REPLY_POWER_LENGTH      (sizeof(ModbusRTU6FloatReplyStruct)) // 29
+#else
+#define MODBUS_REPLY_POWER_LENGTH      (sizeof(ModbusRTU3FloatReplyStruct)) // 17
+#endif
+
+union ModbusRTUReplyUnion {
+    uint8_t ReplyByteBuffer[MODBUS_REPLY_POWER_LENGTH] = { 0x01, 0x03 };
+    ModbusRTUMinimalReplyStruct ModbusRTUMinimalReply;
+    ModbusRTU3FloatReplyStruct ModbusRTU3FloatReply;
+#if defined SUPPORT_SOFAR_EXTENSIONS
+    ModbusRTU3FloatReplyStruct ModbusRTU6FloatReply;
+#endif
+};
+ModbusRTUReplyUnion sModbusRTUReplyUnion;
+
+#define MODBUS_BAUDRATE                         9600
 bool checkAndReplyToModbusRequest();
 uint16_t calculateCrc(uint8_t *aBuffer, uint16_t aBufferLength);
 
@@ -138,9 +185,9 @@ uint16_t sDeltaTCNT1; // Difference between two synchronizing points, with 26 us
  */
 LiquidCrystal myLCD(11, 12, 7, 8, 9, 10); // Pins 7 to 12
 
-#define LCD_COLUMNS                                 20
-#define LCD_ROWS                                    4
-#define MILLISECONDS_BETWEEN_LCD_OUTPUT             (8 * DURATION_OF_ONE_LOOP_MILLIS) // 640
+#define LCD_COLUMNS                             20
+#define LCD_ROWS                                4
+#define MILLISECONDS_BETWEEN_LCD_OUTPUT         (8 * DURATION_OF_ONE_LOOP_MILLIS) // 640
 void printDataOnLCD();                  // Called every MILLISECONDS_BETWEEN_LCD_OUTPUT
 
 uint32_t sMillisOfLastLCDOutput;
@@ -173,7 +220,7 @@ SoftwareSerialTX TxToModbusClient(MODBUS_TX_PIN);
  * for LCD we accumulate up to 10 periods, so we have an overflow above around 3.2 kW if we use int16_t
  */
 uint8_t sNumberOfPowerSamplesForLCD;    //
-int32_t sPowerForLCDAccumulator[3];     // Index 0 is for L1, 1 is for L2 at ADC channel 2 etc. We can have up to 10 samples
+int32_t sPowerForLCDAccumulator[3]; // Index 0 is for L1, 1 is for L2 at ADC channel 2 etc. We can have up to 10 samples before displayed on LCD.
 uint8_t sNumberOfPowerSamplesForModbus;
 int32_t sPowerForModbusAccumulator[3];  // Index 0 is for L1, 1 is for L2 at ADC channel 2 etc.
 
@@ -220,6 +267,9 @@ volatile uint8_t sIndexOfCurrentToPrint = 1; // 0 = negative L1, 1 = LI, 2 = L2,
 volatile bool sPageButtonJustPressed = false;
 void handlePageButtonPressForArduinoPlotterLineSelect();
 
+uint16_t swap(uint16_t aWordToSwapBytes);
+uint32_t swap(uint32_t aLongToSwapBytes);
+
 #define POWER_METER_PAGE_POWER          0
 #define POWER_METER_PAGE_ENERGY         1
 #define POWER_METER_PAGE_INFO           2   // Shows time of energy and power correction percentage
@@ -258,6 +308,11 @@ EasyButton PageButtonAtPin3(&handlePageButtonPress); // Button is connected to I
 #define STR(x) STR_HELPER(x)
 
 void setup() {
+    /*
+     * Disable watchdog for setup
+     */
+    wdt_disable();
+
     initStackFreeMeasurement();
 
 // initialize the digital pin as an output.
@@ -343,10 +398,9 @@ void setup() {
         /*
          * TEST
          */
-        uint16_t tCRC = calculateCrc(sReplyBuffer, MODBUS_REPLY_POWER_LENGTH - 2);
-        sReplyBuffer[MODBUS_REPLY_POWER_LENGTH - 2] = tCRC >> 8;
-        sReplyBuffer[MODBUS_REPLY_POWER_LENGTH - 1] = tCRC;
-        TxToModbusClient.write(sReplyBuffer, MODBUS_REPLY_POWER_LENGTH); // 17 ms
+        uint16_t tCRC = calculateCrc(sModbusRTUReplyUnion.ReplyByteBuffer, MODBUS_REPLY_POWER_LENGTH - 2);
+        sModbusRTUReplyUnion.ModbusRTU3FloatReply.CRC = swap(tCRC);
+        TxToModbusClient.write(sModbusRTUReplyUnion.ReplyByteBuffer, MODBUS_REPLY_POWER_LENGTH); // 17 ms
     } else {
         Serial.begin(115200);
         Serial.println();
@@ -372,12 +426,20 @@ void setup() {
      * 9600 baud soft serial to Modbus client. For serial from client we use the hardware Serial RX.
      */
     TxToModbusClient.begin(MODBUS_BAUDRATE);
+
+    /*
+     * Enable Watchdog of 120 ms
+     */
+    wdt_enable(WDTO_120MS);
 }
 
 void loop() {
 
     TIMING_PIN_HIGH();
 //    disableMillisInterrupt(); // Required if called readVoltage(false);. Disable Timer0 (millis()) overflow interrupt.
+    /*
+     * Read voltage of phase A
+     */
     readVoltage(true);
     TIMING_PIN_LOW();
 
@@ -396,9 +458,12 @@ void loop() {
         tIndexOfCurrentToPrint = sIndexOfCurrentToPrint;
     }
 
-    loop_until_bit_is_set(TIFR1, OCF1A);
-    TIMING_PIN_HIGH(); // 3.396 ms
-    int32_t tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WITH_13_MS_DELAY);
+    loop_until_bit_is_set(TIFR1, OCF1A); // Wait for timer
+    TIMING_PIN_HIGH();
+    /*
+     * Read current values and compute power of phase C
+     */
+    int32_t tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WITH_13_MS_DELAY); // 3.396 ms
     TIMING_PIN_LOW();
 
     /*
@@ -424,6 +489,9 @@ void loop() {
     loop_until_bit_is_set(TIFR1, OCF1A);
 
     TIMING_PIN_HIGH(); // 3.34 ms
+    /*
+     * Read current values and compute power of phase B
+     */
     tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WITH_7_MS_DELAY);
     TIMING_PIN_LOW();
 
@@ -458,11 +526,14 @@ void loop() {
     loop_until_bit_is_set(TIFR1, OCF1A);
 
     TIMING_PIN_HIGH(); // 3.34 ms
+    /*
+     * Read current values and compute power of reference phase A
+     */
     tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WHICH_CAN_BE_NEGATIVE);
     /*
-     * Read negative half wave, since this is the channel, where we may sell power
+     * Read negative half wave phase A, since this is the channel, where we may sell power
      */
-    tPowerRaw -= readCurrentRaw(tIndexOfCurrentToPrint == 0); // negative half wave of reference line is always stored in 0
+    tPowerRaw -= readCurrentRaw(tIndexOfCurrentToPrint == 0); // negative half wave of reference phase A is always stored in 0
     TIMING_PIN_LOW();
 
     /*
@@ -470,6 +541,11 @@ void loop() {
      */
     ADMUX = ADC_CHANNEL_FOR_VOLTAGE | (INTERNAL << SHIFT_VALUE_FOR_REFERENCE); // prepare for next reading voltage
     enableMillisInterrupt(DURATION_OF_ONE_MEASUREMENT_MILLIS); // compensate for 60 ms of ADC reading
+
+    /*
+     * Reset watchdog here
+     */
+    wdt_reset();
 
     /*
      * Computing and slow actions
@@ -730,6 +806,7 @@ void printDataOnLCD() {
 /*
  * 1.1 V at 30 A gives a resolution of 30 mA => 7 W @ 230 V
  * It seems, that the receive interrupt does not disturb the timing :-)
+ * @return sum of 384 times (current * voltage) from sVoltageArray
  */
 uint32_t readCurrentRaw(bool aStoreInArray) {
 //    digitalWriteFast(TIMING_DEBUG_OUTPUT_PIN, HIGH);
@@ -845,31 +922,70 @@ void printPaddedHexOnMyLCD(uint8_t aHexByteValue) {
     myLCD.print(aHexByteValue, HEX);
 }
 
-void replyCurrentTransformerRatio() {
-    uint8_t sReplyBufferIndex = MODBUS_REPLY_LENGTH_INDEX;
-    sReplyBuffer[sReplyBufferIndex++] = 2; // Length of 1 word
-    sReplyBuffer[sReplyBufferIndex++] = 0;
-    sReplyBuffer[sReplyBufferIndex++] = 40; // Assume CurrentTransformerRatio as 40 (for CT's of 200A/5A ?)
-//    sReplyBuffer[sReplyBufferIndex++] = 0x00; // CRC is constant here
-//    sReplyBuffer[sReplyBufferIndex++] = 0x00;
+uint16_t swap(uint16_t aWordToSwapBytes) {
+    return ((aWordToSwapBytes << 8) | (aWordToSwapBytes >> 8));
+}
 
-    uint16_t tCRC = calculateCrc(sReplyBuffer, MODBUS_REPLY_ONE_WORD_LENGTH - 2);
-    Serial.print(F("CRC=0x"));
-    Serial.println(tCRC, HEX);
-    sReplyBuffer[MODBUS_REPLY_ONE_WORD_LENGTH - 2] = tCRC >> 8;
-    sReplyBuffer[MODBUS_REPLY_ONE_WORD_LENGTH - 1] = tCRC;
-    TxToModbusClient.write(sReplyBuffer, MODBUS_REPLY_ONE_WORD_LENGTH); // blocking write of 18 ms
+uint32_t swap(uint32_t aLongToSwapBytes) {
+    return ((aLongToSwapBytes << 24) | ((aLongToSwapBytes & 0xFF00) << 8) | ((aLongToSwapBytes >> 8) & 0xFF00)
+            | (aLongToSwapBytes >> 24));
 }
 
 /*
- * Deye Request frame 8 ms every 100 ms -> Reply frame 18 ms
+ * Requested by Sofar Inverter with
+ * 01 03  00 06  00 01  64 0B
+ */
+void replyCurrentTransformerRatio() {
+    sModbusRTUReplyUnion.ModbusRTUMinimalReply.ReplyByteLength = 2; // Length of 1 word
+    // write swapped value. Assume CurrentTransformerRatio as 40 (for CT's of 200A/5A ?)
+    sModbusRTUReplyUnion.ModbusRTUMinimalReply.SwappedFirstRegisterContent = (40 << 8);
+//    sReplyBuffer[sReplyBufferIndex++] = 0x00; // CRC is constant here
+//    sReplyBuffer[sReplyBufferIndex++] = 0x00;
+
+    uint16_t tCRC = calculateCrc(sModbusRTUReplyUnion.ReplyByteBuffer, MODBUS_REPLY_ONE_WORD_LENGTH - 2);
+    sModbusRTUReplyUnion.ModbusRTUMinimalReply.CRC = swap(tCRC);
+    Serial.print(F("CRC=0x"));
+    Serial.println(tCRC, HEX);
+    TxToModbusClient.write(sModbusRTUReplyUnion.ReplyByteBuffer, MODBUS_REPLY_ONE_WORD_LENGTH); // blocking write of 18 ms
+}
+
+/*
+ * Requested by Sofar Inverter with
+ * 01 03  10 1E  00 0C  21 09
+ */
+void replyTotalActiveEnergy() {
+    LongUnion tPower;
+    sModbusRTUReplyUnion.ModbusRTU3FloatReply.ReplyByteLength = 24; // Length of 6 float values
+
+    for (uint_fast8_t i = 0; i < 3; ++i) {
+        /*
+         * Convert to little endian float and copy it to big endian buffer
+         */
+        tPower.Float = (float) ((sPowerForModbusAccumulator[i] / sNumberOfPowerSamplesForModbus));
+        tPower.Float /= 1000; // At address 15 1E Deye expects float power values in kW units
+        tPower.ULong = swap(tPower.ULong); // reverse bytes. We must send MSB . . LSB
+        sModbusRTUReplyUnion.ModbusRTU3FloatReply.SwappedRegisterContent[i] = tPower.Float;
+    }
+    uint16_t tCRC = calculateCrc(sModbusRTUReplyUnion.ReplyByteBuffer, MODBUS_REPLY_POWER_LENGTH - 2);
+    //            Serial.print(F("CRC=0x"));
+    //            Serial.println(tCRC, HEX);
+    sModbusRTUReplyUnion.ModbusRTU3FloatReply.CRC = swap(tCRC);
+    TxToModbusClient.write(sModbusRTUReplyUnion.ReplyByteBuffer, MODBUS_REPLY_POWER_LENGTH); // blocking write of 18 ms
+    sNumberOfPowerSamplesForModbus = 0;
+    sPowerForModbusAccumulator[0] = 0;
+    sPowerForModbusAccumulator[1] = 0;
+    sPowerForModbusAccumulator[2] = 0;
+}
+
+/*
+ * Sofar Request frame
  * 01 03  20 14  00 06  8E 0C -> 01 03 0C  00 00 00 00  00 00 00 00  00 00 00 00  CRCH CRCL
  * At address 20 14 DTSU666 sends float power values in 0.1 W units
  */
 void replyPower0Point1W() {
     LongUnion tPower;
-    uint8_t sReplyBufferIndex = MODBUS_REPLY_LENGTH_INDEX;
-    sReplyBuffer[sReplyBufferIndex++] = 12; // Length of 3 float values
+
+    sModbusRTUReplyUnion.ModbusRTU3FloatReply.ReplyByteLength = 12; // Length of 3 float values
 
     for (uint_fast8_t i = 0; i < 3; ++i) {
         /*
@@ -877,17 +993,15 @@ void replyPower0Point1W() {
          */
         tPower.Float = (float) ((sPowerForModbusAccumulator[i] / sNumberOfPowerSamplesForModbus));
         tPower.Float *= 10; // At address 20 14 DTSU666 sends float power values in 0.1 W units
-        // reverse bytes. We must send MSB . . LSB
-        for (int_fast8_t j = 3; j >= 0; j--) {
-            sReplyBuffer[sReplyBufferIndex++] = tPower.UBytes[j];
-        }
+        tPower.ULong = swap(tPower.ULong); // reverse bytes. We must send MSB . . LSB
+        sModbusRTUReplyUnion.ModbusRTU3FloatReply.SwappedRegisterContent[i] = tPower.Float;
     }
-    uint16_t tCRC = calculateCrc(sReplyBuffer, MODBUS_REPLY_POWER_LENGTH - 2);
+
+    uint16_t tCRC = calculateCrc(sModbusRTUReplyUnion.ReplyByteBuffer, MODBUS_REPLY_POWER_LENGTH - 2);
     //            Serial.print(F("CRC=0x"));
     //            Serial.println(tCRC, HEX);
-    sReplyBuffer[MODBUS_REPLY_POWER_LENGTH - 2] = tCRC >> 8;
-    sReplyBuffer[MODBUS_REPLY_POWER_LENGTH - 1] = tCRC;
-    TxToModbusClient.write(sReplyBuffer, MODBUS_REPLY_POWER_LENGTH); // blocking write of 18 ms
+    sModbusRTUReplyUnion.ModbusRTU3FloatReply.CRC = swap(tCRC);
+    TxToModbusClient.write(sModbusRTUReplyUnion.ReplyByteBuffer, MODBUS_REPLY_POWER_LENGTH); // blocking write of 18 ms
     sNumberOfPowerSamplesForModbus = 0;
     sPowerForModbusAccumulator[0] = 0;
     sPowerForModbusAccumulator[1] = 0;
@@ -901,8 +1015,7 @@ void replyPower0Point1W() {
  */
 void replyPower() {
     LongUnion tPower;
-    uint8_t sReplyBufferIndex = MODBUS_REPLY_LENGTH_INDEX;
-    sReplyBuffer[sReplyBufferIndex++] = 12; // Length of 3 float values
+    sModbusRTUReplyUnion.ModbusRTU3FloatReply.ReplyByteLength = 12; // Length of 3 float values
 
     for (uint_fast8_t i = 0; i < 3; ++i) {
         /*
@@ -910,30 +1023,30 @@ void replyPower() {
          */
         tPower.Float = (float) ((sPowerForModbusAccumulator[i] / sNumberOfPowerSamplesForModbus));
         tPower.Float /= 1000; // At address 15 1E Deye expects float power values in kW units
-        // reverse bytes. We must send MSB . . LSB
-        for (int_fast8_t j = 3; j >= 0; j--) {
-            sReplyBuffer[sReplyBufferIndex++] = tPower.UBytes[j];
-        }
+        tPower.ULong = swap(tPower.ULong); // reverse bytes. We must send MSB . . LSB
+        sModbusRTUReplyUnion.ModbusRTU3FloatReply.SwappedRegisterContent[i] = tPower.Float;
     }
-    uint16_t tCRC = calculateCrc(sReplyBuffer, MODBUS_REPLY_POWER_LENGTH - 2);
+    uint16_t tCRC = calculateCrc(sModbusRTUReplyUnion.ReplyByteBuffer, MODBUS_REPLY_POWER_LENGTH - 2);
     //            Serial.print(F("CRC=0x"));
     //            Serial.println(tCRC, HEX);
-    sReplyBuffer[MODBUS_REPLY_POWER_LENGTH - 2] = tCRC >> 8;
-    sReplyBuffer[MODBUS_REPLY_POWER_LENGTH - 1] = tCRC;
-    TxToModbusClient.write(sReplyBuffer, MODBUS_REPLY_POWER_LENGTH); // blocking write of 18 ms
+    sModbusRTUReplyUnion.ModbusRTU3FloatReply.CRC = swap(tCRC);
+    TxToModbusClient.write(sModbusRTUReplyUnion.ReplyByteBuffer, MODBUS_REPLY_POWER_LENGTH); // blocking write of 18 ms
     sNumberOfPowerSamplesForModbus = 0;
     sPowerForModbusAccumulator[0] = 0;
     sPowerForModbusAccumulator[1] = 0;
     sPowerForModbusAccumulator[2] = 0;
 }
+
 /*
  * Deye Request frame 8 ms every 100 ms -> Reply frame 18 ms
  * @return true, if reply was sent (which took 18ms)
+ *     sJKFAllReplyPointer = reinterpret_cast<JKReplyStruct*>(&JKReplyFrameBuffer[JK_BMS_FRAME_HEADER_LENGTH + 2
+ + JKReplyFrameBuffer[JK_BMS_FRAME_INDEX_OF_CELL_INFO_LENGTH]]);
  */
 bool checkAndReplyToModbusRequest() {
     uint8_t tNumberOfAvaliableBytes = Serial.available();
     if (tNumberOfAvaliableBytes >= MODBUS_REQUEST_LENGTH) {
-        Serial.readBytes(sRequestBuffer, MODBUS_REQUEST_LENGTH);
+        Serial.readBytes(sModbusRTURequestUnion.ReceiveByteBuffer, MODBUS_REQUEST_LENGTH);
         if (tNumberOfAvaliableBytes > MODBUS_REQUEST_LENGTH) {
             /*
              * Incorrect request, maybe because the Deye sent a request, while we were responding the last time.
@@ -942,46 +1055,62 @@ bool checkAndReplyToModbusRequest() {
             while (Serial.available()) {
                 Serial.read();
             }
+
         } else {
-            if (sRequestBuffer[MODBUS_ID_INDEX] == 1 && sRequestBuffer[MODBUS_REQUEST_ADDRESS_INDEX] == 0x15
-                    && sRequestBuffer[MODBUS_REQUEST_ADDRESS_INDEX + 1] == 0x1E) {
-                replyPower();
+            uint8_t tBufferErrorPrintOffset = 0;
+            if (sModbusRTURequestUnion.ModbusRTURequest.SlaveAddress == 1
+                    && sModbusRTURequestUnion.ModbusRTURequest.FunctionCode == 3) {
 
-            } else if (sRequestBuffer[MODBUS_ID_INDEX] == 1 && sRequestBuffer[MODBUS_REQUEST_ADDRESS_INDEX] == 0x00
-                    && sRequestBuffer[MODBUS_REQUEST_ADDRESS_INDEX + 1] == 0x06) {
-                replyCurrentTransformerRatio();
-                return true;
+                uint16_t tAddress = swap(sModbusRTURequestUnion.ModbusRTURequest.FirstRegisterAddress);
+                if (tAddress == 0x151E) {
+                    // check other fields of request
+                    if (sModbusRTURequestUnion.ModbusRTURequest.ReplyLengthInWord == 6
+                            && sModbusRTURequestUnion.ModbusRTURequest.CRC == 0xA1C2) {
+                        replyPower();
+                        return true;
+                    }
+                    // length or CRC Error
+                    myLCD.setCursor(0, 0);
+                    myLCD.print('C'); // "CRC" Error
+                    tBufferErrorPrintOffset = 4;
+                } else if (tAddress == 0x0006) {
+                    replyCurrentTransformerRatio();
+                    return true;
 
-            } else if (sRequestBuffer[MODBUS_ID_INDEX] == 1 && sRequestBuffer[MODBUS_REQUEST_ADDRESS_INDEX] == 0x20
-                    && sRequestBuffer[MODBUS_REQUEST_ADDRESS_INDEX + 1] == 0x14) {
-                replyPower0Point1W();
-                return true;
+                } else if (tAddress == 0x2014) {
+                    replyPower0Point1W();
+                    return true;
 
-            } else {
-                /*
-                 * incorrect request of right length
-                 * I have seen 0x3E and 0xFE instead of 0x1E
-                 * -> Show error, but send power anyway
-                 */
-                myLCD.setCursor(8, 1);
-                printPaddedHexOnMyLCD(sRequestBuffer[MODBUS_ID_INDEX]);
-                printPaddedHexOnMyLCD(sRequestBuffer[MODBUS_FUNCTION_INDEX]);
-                printPaddedHexOnMyLCD(sRequestBuffer[MODBUS_REQUEST_ADDRESS_INDEX]);
-                printPaddedHexOnMyLCD(sRequestBuffer[MODBUS_REQUEST_ADDRESS_INDEX + 1]);
+                } else if (tAddress == 0x101E) {
+                    // 01 03  10 1E  00 0C  21 09
+                    // 0x101E positive total active energy / float
+                    // 0x1028 negative total active energy / float
+                    replyTotalActiveEnergy();
+                    return true;
 
-//                Serial.begin(115200);
-//                Serial.print(F("Unexpected request"));
-//                for (uint_fast8_t i = 0; i < MODBUS_REQUEST_LENGTH; ++i) {
-//                    Serial.print(F(" 0x"));
-//                    Serial.print(sRequestBuffer[i]);
-//                }
-//                Serial.println();
-//                Serial.flush();
-//                Serial.begin(MODBUS_BAUDRATE);
-
-                sCounterForDisplayFreeze = 1440; // 12 per second => 1440 is 2 minutes
-                replyPower();
+                } else {
+                    /*
+                     * Length and CRC are not as expected
+                     */
+                    myLCD.setCursor(0, 0);
+                    myLCD.print('C'); // "CRC" Error
+                    tBufferErrorPrintOffset = 4;
+                    // NO return here! Run through to end of function.
+                }
             }
+            /*
+             * incorrect request of right length
+             * I have seen 0x3E and 0xFE instead of 01 03 15 1E
+             * -> Show error, but send power anyway
+             */
+            myLCD.setCursor(8, 1);
+            for (uint_fast8_t i = 0; i < 4; ++i) {
+                printPaddedHexOnMyLCD(sModbusRTURequestUnion.ReceiveByteBuffer[i + tBufferErrorPrintOffset]);
+            }
+
+            sCounterForDisplayFreeze = 1440; // 12 per second => 1440 is 2 minutes
+            replyPower();
+
             return true;
         }
     }
