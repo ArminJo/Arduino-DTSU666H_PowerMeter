@@ -75,7 +75,7 @@
 #include "LiquidCrystal.h"
 #include <avr/wdt.h>
 
-#define VERSION_EXAMPLE "1.1"
+#define VERSION_EXAMPLE "1.2"
 
 /*
  * Mapping of power phase A, B, C to ADC channels 1, 2, 3, which is also the internal index and display and modbus position.
@@ -225,7 +225,8 @@ uint8_t sNumberOfPowerSamplesForModbus;
 int32_t sPowerForModbusAccumulator[3];  // Index 0 is for L1, 1 is for L2 at ADC channel 2 etc.
 
 int32_t sEnergyAccumulator[3];          // Contains sum of sNumberOfSamplesForEnergy entries of power
-int32_t sEnergyAccumulatorSum;
+int32_t sEnergyAccumulatorSumForFlash;
+uint8_t sWattHourFlashCounter;
 uint32_t sNumberOfEnergySamplesForLCD;
 
 int16_t sPowerSum;
@@ -303,11 +304,15 @@ void handlePageButtonPress(bool aButtonToggleState __attribute__((unused))) {
 }
 EasyButton PageButtonAtPin3(&handlePageButtonPress); // Button is connected to INT1
 
+uint8_t sMCUSRStored; // content of MCUSR register at startup
+
 // Helper macro for getting a macro definition as string
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
 
 void setup() {
+    sMCUSRStored = MCUSR; // content of MCUSR register at startup
+    MCUSR = 0; // To reset old boot flags for next boot
     /*
      * Disable watchdog for setup
      */
@@ -341,6 +346,14 @@ void setup() {
      */
     Serial.println(F("START " __FILE__ "\r\nVersion " VERSION_EXAMPLE " from " __DATE__ "_"));
 
+    if (sMCUSRStored & (1 << WDRF)) {
+        Serial.println(F("Reset by watchdog"));
+        myLCD.setCursor(0, 1);
+        myLCD.print(F("Res. by watchdog"));
+        delay(2000); // to show the message
+    }
+    Serial.println();
+
     /*
      * Read power correction percentage
      */
@@ -368,20 +381,16 @@ void setup() {
         Serial.println(F("Line, with 6.6 ms delay is " STR(LINE_WITH_7_MS_DELAY)));
         Serial.println(F("Line, with 13.3 ms delay is " STR(LINE_WITH_13_MS_DELAY)));
 
-        Serial.println(
-                F(
-                        "Waiting for requests to ID " STR(MODBUS_SLAVE_ADDR) " with _" STR(MODBUS_BAUDRATE) "_ baud at pin " STR(MODBUS_RX_PIN) ". Reply / TX is on pin " STR(MODBUS_TX_PIN)));
-        Serial.println(F("First waiting for voltage at line" STR(LINE_WHICH_CAN_BE_NEGATIVE)));
-
         Serial.print(F("Power correction is "));
         Serial.print(sPowerCorrectionPercentage);
         Serial.println(F(" %"));
+
+        Serial.println(
+                F(
+                        "Waiting for requests to ID " STR(MODBUS_SLAVE_ADDR) " with _" STR(MODBUS_BAUDRATE) "_ baud at pin " STR(MODBUS_RX_PIN) ". Reply / TX is on pin " STR(MODBUS_TX_PIN)));
     }
 
     printCorrectionPercentageOnLCD();
-    /*
-     * End of Monitoring output, switch to modbus baudrate
-     */
     Serial.flush();
 
     // Timer 1 for sample timing runs continuously in Normal mode
@@ -392,43 +401,45 @@ void setup() {
 
     ADMUX = ADC_CHANNEL_FOR_VOLTAGE | (INTERNAL << SHIFT_VALUE_FOR_REFERENCE);
 
-    delay(2000);
-
-    if (!digitalReadFast(ENABLE_ARDUINO_PLOTTER_OUTPUT_PIN)) {
-        /*
-         * TEST
-         */
-        uint16_t tCRC = calculateCrc(sModbusRTUReplyUnion.ReplyByteBuffer, MODBUS_REPLY_POWER_LENGTH - 2);
-        sModbusRTUReplyUnion.ModbusRTU3FloatReply.CRC = swap(tCRC);
-        TxToModbusClient.write(sModbusRTUReplyUnion.ReplyByteBuffer, MODBUS_REPLY_POWER_LENGTH); // 17 ms
-    } else {
-        Serial.begin(115200);
-        Serial.println();
-        printRAMInfo(&Serial); // Stack used is 126 bytes
-        Serial.flush();
-        Serial.begin(MODBUS_BAUDRATE);
+    /*
+     * Wait 2 seconds to show LCD content and blink 3 times to indicate booting
+     */
+    for (uint8_t i = 0; i < 3; ++i) {
+        digitalWriteFast(LED_BUILTIN, HIGH);
+        delay(50);
+        digitalWriteFast(LED_BUILTIN, LOW);
+        delay(450);
     }
+    delay(500);
+
+    Serial.println();
+    printRAMInfo(&Serial); // Stack used is 126 bytes
 
     myLCD.setCursor(0, 1);
     myLCD.print(F("Wait for U at L" STR(LINE_WHICH_CAN_BE_NEGATIVE)));
 
-//    Serial.begin(MODBUS_BAUDRATE);
     delay(2000); // delay to show LCD content
 
+    Serial.println();
+    Serial.println(F("First waiting for voltage at line" STR(LINE_WHICH_CAN_BE_NEGATIVE)));
+
     /*
-     * Clear bytes from receive buffer
+     * Switch Arduino Serial to MODBUS_BAUDRATE and clear bytes from receive buffer
      */
+    Serial.println(F("Enable 120 ms watchdog"));
+    Serial.println();
+    Serial.flush();
+    Serial.begin(MODBUS_BAUDRATE);
     while (Serial.available()) {
         Serial.read();
     }
-
     /*
      * 9600 baud soft serial to Modbus client. For serial from client we use the hardware Serial RX.
      */
     TxToModbusClient.begin(MODBUS_BAUDRATE);
 
     /*
-     * Enable Watchdog of 120 ms
+     * Enable Watchdog of 120 ms - 100 ms at my CPU :-(
      */
     wdt_enable(WDTO_120MS);
 }
@@ -451,6 +462,8 @@ void loop() {
     ADMUX = LINE_WITH_13_MS_DELAY | (INTERNAL << SHIFT_VALUE_FOR_REFERENCE);
     TIFR1 = _BV(OCF1A);  // Clear all timer compare flags
 
+    digitalWriteFast(LED_BUILTIN, LOW);
+
     uint8_t tIndexOfCurrentToPrint = 0xFF;  // Disable store to array
 
     bool tPeriodicallyPrintIsEnabled = !digitalReadFast(ENABLE_ARDUINO_PLOTTER_OUTPUT_PIN); // active if low
@@ -466,6 +479,7 @@ void loop() {
     int32_t tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WITH_13_MS_DELAY); // 3.396 ms
     TIMING_PIN_LOW();
 
+    digitalWriteFast(LED_BUILTIN, HIGH); // To signal, that loop is still running
     /*
      * - Change ADC channel, set new timer compare value, and clear all timer compare flags.
      * - Wait for timer
@@ -481,11 +495,12 @@ void loop() {
     } else {
         tPower = (((tPowerRaw / 100) * sPowerCorrectionPercentage) + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
     }
+    digitalWriteFast(LED_BUILTIN, LOW); // To signal, that loop is still running
 
     sPowerForLCDAccumulator[LINE_WITH_13_MS_DELAY - 1] += tPower;
     sPowerForModbusAccumulator[LINE_WITH_13_MS_DELAY - 1] += tPower;
     sEnergyAccumulator[LINE_WITH_13_MS_DELAY - 1] += tPower;
-    sEnergyAccumulatorSum += tPower;
+    sEnergyAccumulatorSumForFlash += tPower;
     loop_until_bit_is_set(TIFR1, OCF1A);
 
     TIMING_PIN_HIGH(); // 3.34 ms
@@ -511,7 +526,7 @@ void loop() {
     sPowerForLCDAccumulator[LINE_WITH_7_MS_DELAY - 1] += tPower;
     sPowerForModbusAccumulator[LINE_WITH_7_MS_DELAY - 1] += tPower;
     sEnergyAccumulator[LINE_WITH_7_MS_DELAY - 1] += tPower;
-    sEnergyAccumulatorSum += tPower;
+    sEnergyAccumulatorSumForFlash += tPower;
 
     // Do it here and not after the last reading
     sNumberOfPowerSamplesForLCD++;
@@ -548,7 +563,7 @@ void loop() {
     wdt_reset();
 
     /*
-     * Computing and slow actions
+     * 60 ms of measurement are gone now, do computing and slow actions
      */
     if (sPowerCorrectionPercentage == 100) {
         tPower = (tPowerRaw + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
@@ -558,16 +573,30 @@ void loop() {
 
     sPowerForLCDAccumulator[LINE_WHICH_CAN_BE_NEGATIVE - 1] += tPower;
     sPowerForModbusAccumulator[LINE_WHICH_CAN_BE_NEGATIVE - 1] += tPower;
-
     sEnergyAccumulator[LINE_WHICH_CAN_BE_NEGATIVE - 1] += tPower;
-    sEnergyAccumulatorSum += tPower;
-    digitalWriteFast(LED_BUILTIN, LOW);
-    if (sEnergyAccumulatorSum > ENERGY_DIVISOR) {
-        sEnergyAccumulatorSum -= ENERGY_DIVISOR;
+    sEnergyAccumulatorSumForFlash += tPower;
+
+    /*
+     * Check for 2. flash, indicating negative energy
+     */
+    if (sWattHourFlashCounter > 0) {
+        sWattHourFlashCounter--;
+        if (sWattHourFlashCounter == 0) {
+            digitalWriteFast(LED_BUILTIN, HIGH); // Flash again for 30 ms
+        }
+    }
+
+    /*
+     * Check for next watt-hour
+     */
+    if (sEnergyAccumulatorSumForFlash > ENERGY_DIVISOR) {
+        sEnergyAccumulatorSumForFlash -= ENERGY_DIVISOR;
+        sWattHourFlashCounter = 0; // one 30 ms flash
         digitalWriteFast(LED_BUILTIN, HIGH); // blink for 80 ms
-    } else if (sEnergyAccumulatorSum < -ENERGY_DIVISOR) {
-        sEnergyAccumulatorSum += ENERGY_DIVISOR;
-        digitalWriteFast(LED_BUILTIN, HIGH); // blink for 80 ms
+    } else if (sEnergyAccumulatorSumForFlash < -ENERGY_DIVISOR) {
+        sEnergyAccumulatorSumForFlash += ENERGY_DIVISOR;
+        sWattHourFlashCounter = 2; // 2 30 ms flashes on negative energy
+        digitalWriteFast(LED_BUILTIN, HIGH);
     }
 
     /*
@@ -617,6 +646,8 @@ void loop() {
         sEnergyAccumulator[1] = 0;
         sEnergyAccumulator[2] = 0;
     }
+
+//    delay(100); // to test watchdog
 }
 
 /*
@@ -744,8 +775,8 @@ void printDataOnLCD() {
             myLCD.setCursor(0, 1);
             print6DigitsWatt(sPowerForLCDAccumulator[2] / sNumberOfPowerSamplesForLCD);
             if (sCounterForDisplayFreeze == 0) {
-                int16_t tPowerSum = (sPowerForLCDAccumulator[0] + sPowerForLCDAccumulator[1]
-                        + sPowerForLCDAccumulator[2]) / sNumberOfPowerSamplesForLCD;
+                int16_t tPowerSum = (sPowerForLCDAccumulator[0] + sPowerForLCDAccumulator[1] + sPowerForLCDAccumulator[2])
+                        / sNumberOfPowerSamplesForLCD;
                 print6DigitsWatt(tPowerSum);
             }
 
@@ -1038,7 +1069,7 @@ void replyPower() {
 }
 
 /*
- * Deye Request frame 8 ms every 100 ms -> Reply frame 18 ms
+ * Deye Request frame 01 03  15 1E  00 06  A1 C2 with duration 8 ms every 100 ms -> Reply frame 18 ms
  * @return true, if reply was sent (which took 18ms)
  *     sJKFAllReplyPointer = reinterpret_cast<JKReplyStruct*>(&JKReplyFrameBuffer[JK_BMS_FRAME_HEADER_LENGTH + 2
  + JKReplyFrameBuffer[JK_BMS_FRAME_INDEX_OF_CELL_INFO_LENGTH]]);
@@ -1049,7 +1080,7 @@ bool checkAndReplyToModbusRequest() {
         Serial.readBytes(sModbusRTURequestUnion.ReceiveByteBuffer, MODBUS_REQUEST_LENGTH);
         if (tNumberOfAvaliableBytes > MODBUS_REQUEST_LENGTH) {
             /*
-             * Incorrect request, maybe because the Deye sent a request, while we were responding the last time.
+             * Too many bytes available. Incorrect request, maybe because the Deye sent a request, while we were responding the last time.
              * Clear additional bytes from receive buffer
              */
             while (Serial.available()) {
@@ -1070,10 +1101,11 @@ bool checkAndReplyToModbusRequest() {
                         replyPower();
                         return true;
                     }
-                    // length or CRC Error
+                    // Here we have length or CRC Error for request 151E
                     myLCD.setCursor(0, 0);
                     myLCD.print('C'); // "CRC" Error
-                    tBufferErrorPrintOffset = 4;
+                    tBufferErrorPrintOffset = 4; // show last 4 bytes of wrong request
+
                 } else if (tAddress == 0x0006) {
                     replyCurrentTransformerRatio();
                     return true;
@@ -1089,15 +1121,8 @@ bool checkAndReplyToModbusRequest() {
                     replyTotalActiveEnergy();
                     return true;
 
-                } else {
-                    /*
-                     * Length and CRC are not as expected
-                     */
-                    myLCD.setCursor(0, 0);
-                    myLCD.print('C'); // "CRC" Error
-                    tBufferErrorPrintOffset = 4;
-                    // NO return here! Run through to end of function.
                 }
+                // every case with no return will show the error line
             }
             /*
              * incorrect request of right length
@@ -1105,6 +1130,7 @@ bool checkAndReplyToModbusRequest() {
              * -> Show error, but send power anyway
              */
             myLCD.setCursor(8, 1);
+            // print first or last 4 bytes of request dependent of tBufferErrorPrintOffset
             for (uint_fast8_t i = 0; i < 4; ++i) {
                 printPaddedHexOnMyLCD(sModbusRTURequestUnion.ReceiveByteBuffer[i + tBufferErrorPrintOffset]);
             }
