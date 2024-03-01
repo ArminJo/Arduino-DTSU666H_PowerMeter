@@ -392,8 +392,6 @@ void setup() {
 
     printCorrectionPercentageOnLCD();
 
-
-
     Serial.flush();
 
     // Timer 1 for sample timing runs continuously in Normal mode

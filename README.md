@@ -33,6 +33,7 @@ On phase L1 it reads every 4. current waves, on phase L2 and L3 it reads only ev
 - Debug button/switch for realtime monitoring analog current and voltage of 4 different half waves with Arduino Plotter.
 - Serial.print() function is still available for monitoring and debugging.
 
+#### Contains a simple [Modbus sniffer program](https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter/tree/main/DTSU666ModbusSniffer) to display the power values sent by a DTSU666-H power meter or this program on a 1602 serial LCD.
 <br/>
 
 # Principle of operation
@@ -65,6 +66,8 @@ Sometimes the Deye sends the request, while we do a reply.
 | ![Breadboard detail](https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter/blob/main/pictures/Breadboard.jpg) | ![Automatic brightness](https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter/blob/main/pictures/AutomaticBrightness.jpg) |
 | Split-core current transformers used | Deye settings |
 | ![Split-coil](https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter/blob/main/pictures/SplitCoil.jpg) | ![Deye settings](https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter/blob/main/pictures/DeyeSettingsForDTDSU666.jpg) |
+| DTSU666ModbusSniffer |  |
+| ![DTSU666ModbusSniffer](https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter/blob/main/pictures/DTSU666ModbusSniffer.jpg) |  |
 
 <br/>
 
