@@ -391,6 +391,9 @@ void setup() {
     }
 
     printCorrectionPercentageOnLCD();
+
+
+
     Serial.flush();
 
     // Timer 1 for sample timing runs continuously in Normal mode
@@ -419,6 +422,14 @@ void setup() {
     myLCD.print(F("Wait for U at L" STR(LINE_WHICH_CAN_BE_NEGATIVE)));
 
     delay(2000); // delay to show LCD content
+
+    // Show Reset by Watchdog indicator
+    myLCD.setCursor(0, 1);
+    if (sMCUSRStored & (1 << WDRF)) {
+        myLCD.print('W');
+    } else {
+        myLCD.print(' ');
+    }
 
     Serial.println();
     Serial.println(F("First waiting for voltage at line" STR(LINE_WHICH_CAN_BE_NEGATIVE)));
@@ -591,8 +602,7 @@ void loop() {
      */
     if (sEnergyAccumulatorSumForFlash > ENERGY_DIVISOR) {
         sEnergyAccumulatorSumForFlash -= ENERGY_DIVISOR;
-        sWattHourFlashCounter = 0; // one 30 ms flash
-        digitalWriteFast(LED_BUILTIN, HIGH); // blink for 80 ms
+        digitalWriteFast(LED_BUILTIN, HIGH); // one 30 ms flash
     } else if (sEnergyAccumulatorSumForFlash < -ENERGY_DIVISOR) {
         sEnergyAccumulatorSumForFlash += ENERGY_DIVISOR;
         sWattHourFlashCounter = 2; // 2 30 ms flashes on negative energy
@@ -772,8 +782,10 @@ void printDataOnLCD() {
             print6DigitsWatt(sPowerForLCDAccumulator[0] / sNumberOfPowerSamplesForLCD);
             print6DigitsWatt(sPowerForLCDAccumulator[1] / sNumberOfPowerSamplesForLCD);
 
-            myLCD.setCursor(0, 1);
-            print6DigitsWatt(sPowerForLCDAccumulator[2] / sNumberOfPowerSamplesForLCD);
+            // Do not overwrite Reset by Watchdog indicator
+            myLCD.setCursor(1, 1);
+            sprintf_P(sStringBufferForLCDRow, PSTR("%5d W"), sPowerForLCDAccumulator[2] / sNumberOfPowerSamplesForLCD); // force use of 5 columns
+            myLCD.print(sStringBufferForLCDRow);
             if (sCounterForDisplayFreeze == 0) {
                 int16_t tPowerSum = (sPowerForLCDAccumulator[0] + sPowerForLCDAccumulator[1] + sPowerForLCDAccumulator[2])
                         / sNumberOfPowerSamplesForLCD;
