@@ -25,17 +25,31 @@ On phase L1 it reads every 4. current waves, on phase L2 and L3 it reads only ev
 <br/>
 
 # Features
-- Astonishing accuracy of 1% at my site.
-- Every watt-hour, the build-in LED flashes for 80 ms.
-- 2 buttons to set a correction percentage other than 100% - which was not required at my site :-).
-- Display of Power, Energy, Time for energy and correction percentage on a locally attached 1602 LCD.
-- Page button for switching 4 LCD display pages.
-- Debug button/switch for realtime monitoring analog current and voltage of 4 different half waves with Arduino Plotter.
-- Serial.print() function is still available for monitoring and debugging.
-- Watchdog reset after 8 seconds. E.g. if zero voltage crossing cannot be determined.
-- Display of watchdog reset, which currently (3/2024) only works with [optiboot 8.1 bootloader](https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter/tree/main/Optiboot_8_1).
+- Astonishing **accuracy of 1%** at my site.
+- Every watt-hour, the build-in LED **flashes for 30 ms**. On negative energy it flashes twice.
+- 2 buttons to set a **correction percentage** other than 100% - which was not required at my site :-).
+- Display of Power, Energy, Time for energy and correction percentage on a **locally attached 1602 LCD**.
+- Page button for switching **4 LCD display pages**.
+- Debug button/switch for realtime **monitoring analog current and voltage** of 4 different half waves with Arduino Plotter.
+- **Serial.print() is still available** for monitoring and debugging.
+- **Watchdog** reset after 8 seconds. It resets the CPU, e.g. if zero voltage crossing cannot be determined, or the program hangs at another location.
+- Display of watchdog reset reason, which currently (3/2024) only works with [optiboot 8.1 bootloader](https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter/tree/main/Optiboot_8_1).
 
-#### Contains a simple [Modbus sniffer program](https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter/tree/main/DTSU666ModbusSniffer) to display the power values sent by a DTSU666-H power meter or this program on a 1602 serial LCD.
+<br/>
+
+# Modbus sniffer
+For all, which want to see the values sent by a real DTSU666 or see the vlues sent by this program e.g. at the other end of the RS485 line, this repository contains a simple [Modbus sniffer program](https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter/tree/main/DTSU666ModbusSniffer). It displays the power values on a 1602 serial LCD.
+
+<br/>
+
+# Modbus sending and receiving
+Modbus reply sending at 9600 baud is done by [SoftwareSerialTX](https://github.com/Jueff/SoftwareSerialTX).
+This enables the usage of the Arduino Serial for monitoring and debugging.<br/>
+Modbus receiving at 9600 baud is done by standard Arduino Serial at 9600 baud.<br/>
+Monitoring output is done by switching Arduino Serial baudrate to 115200 baud,
+send data, flush it and reset Arduino Serial baudrate back to 9600 baud.<br/>
+During monitoring output, receiving of modbus requests is therefore disturbed!
+
 <br/>
 
 # Principle of operation

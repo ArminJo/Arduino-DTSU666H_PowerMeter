@@ -307,6 +307,12 @@ void handlePageButtonPress(bool aButtonToggleState __attribute__((unused))) {
 EasyButton PageButtonAtPin3(&handlePageButtonPress); // Button is connected to INT1
 
 uint8_t sMCUSRStored; // content of MCUSR register at startup
+/*
+ * A variable to hold the reset cause written by the main program
+ * It must not be overwritten by the initialization code after a reset.
+ * avr-gcc provides this via the ".noinit" section.
+ */
+char sWatchdogResetInfoCharacter __attribute__ ((section(".noinit")));
 
 // Helper macro for getting a macro definition as string
 #define STR_HELPER(x) #x
@@ -349,7 +355,8 @@ void setup() {
     Serial.println(F("START " __FILE__ "\r\nVersion " VERSION_EXAMPLE " from " __DATE__ "_"));
 
     if (sMCUSRStored & (1 << WDRF)) {
-        Serial.println(F("Reset by watchdog"));
+        Serial.print(F("Reset by watchdog, reason="));
+        Serial.println(sWatchdogResetInfoCharacter);
         myLCD.setCursor(0, 1);
         myLCD.print(F("Res. by watchdog"));
         delay(2000); // to show the message
@@ -426,18 +433,18 @@ void setup() {
     // Show Reset by Watchdog indicator
     myLCD.setCursor(0, 1);
     if (sMCUSRStored & (1 << WDRF)) {
-        myLCD.print('W');
+        myLCD.print(sWatchdogResetInfoCharacter); // print it only once here, it will be overwritten by switching pages.
     } else {
         myLCD.print(' ');
     }
 
     Serial.println();
-    Serial.println(F("First waiting for voltage at line" STR(LINE_WHICH_CAN_BE_NEGATIVE)));
 
     /*
      * Switch Arduino Serial to MODBUS_BAUDRATE and clear bytes from receive buffer
      */
-    Serial.println(F("Enable 120 ms watchdog"));
+    Serial.println(F("Enable 8 s watchdog"));
+    Serial.println(F("First waiting for voltage at line" STR(LINE_WHICH_CAN_BE_NEGATIVE)));
     Serial.println();
     Serial.flush();
     Serial.begin(MODBUS_BAUDRATE);
@@ -458,11 +465,13 @@ void setup() {
 void loop() {
 
     TIMING_PIN_HIGH();
+    sWatchdogResetInfoCharacter = 'V'; // indicator for hangup at voltage zero crossing detection
 //    disableMillisInterrupt(); // Required if called readVoltage(false);. Disable Timer0 (millis()) overflow interrupt.
     /*
      * Read voltage of phase A
      */
     readVoltage(true);
+    sWatchdogResetInfoCharacter = 'A'; // Hangup at current measurement code
     TIMING_PIN_LOW();
 
     /*
@@ -560,6 +569,7 @@ void loop() {
      * Read negative half wave phase A, since this is the channel, where we may sell power
      */
     tPowerRaw -= readCurrentRaw(tIndexOfCurrentToPrint == 0); // negative half wave of reference phase A is always stored in 0
+    sWatchdogResetInfoCharacter = 'L'; // Hangup at loop() code
     TIMING_PIN_LOW();
 
     /*
@@ -657,7 +667,7 @@ void loop() {
         sEnergyAccumulator[2] = 0;
     }
 
-//    delay(100); // to test watchdog
+//    delay(10000); // to test watchdog
 }
 
 /*
