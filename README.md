@@ -32,6 +32,8 @@ On phase L1 it reads every 4. current waves, on phase L2 and L3 it reads only ev
 - Page button for switching 4 LCD display pages.
 - Debug button/switch for realtime monitoring analog current and voltage of 4 different half waves with Arduino Plotter.
 - Serial.print() function is still available for monitoring and debugging.
+- Watchdog reset after 8 seconds. E.g. if zero voltage crossing cannot be determined.
+- Display of watchdog reset, which currently (3/2024) only works with [optiboot 8.1 bootloader](https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter/tree/main/Optiboot_8_1).
 
 #### Contains a simple [Modbus sniffer program](https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter/tree/main/DTSU666ModbusSniffer) to display the power values sent by a DTSU666-H power meter or this program on a 1602 serial LCD.
 <br/>

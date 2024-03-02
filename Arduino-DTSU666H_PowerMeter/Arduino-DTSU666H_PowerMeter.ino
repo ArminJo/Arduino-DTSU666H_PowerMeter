@@ -171,7 +171,6 @@ uint16_t calculateCrc(uint8_t *aBuffer, uint16_t aBufferLength);
 #else
 #define TIMING_PIN_HIGH()                       void()
 #define TIMING_PIN_LOW()                        void()
-
 #endif
 
 #define DURATION_OF_ONE_MEASUREMENT_MILLIS      60 // Cannot be changed! From start of voltage measurement to end of L1 negative current measurement
@@ -299,6 +298,9 @@ void handlePageButtonPress(bool aButtonToggleState __attribute__((unused))) {
         sLCDDisplayPage++;
         if (sLCDDisplayPage > POWER_METER_PAGE_MAX) {
             sLCDDisplayPage = POWER_METER_PAGE_POWER;
+            // Clear watchdog flag position
+            myLCD.setCursor(0, 1);
+            myLCD.print(' ');
         }
     }
 }
@@ -448,9 +450,9 @@ void setup() {
     TxToModbusClient.begin(MODBUS_BAUDRATE);
 
     /*
-     * Enable Watchdog of 120 ms - 100 ms at my CPU :-(
+     * Enable Watchdog of 8 s - 7 s at my CPU :-(
      */
-    wdt_enable(WDTO_120MS);
+    wdt_enable(WDTO_8S);
 }
 
 void loop() {
