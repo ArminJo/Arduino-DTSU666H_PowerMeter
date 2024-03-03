@@ -34,6 +34,7 @@
 #define MODBUS_BAUDRATE              9600
 //#define STANDALONE_TEST                   // If activated, random power is displayed on LCD.
 #define DEBUG_PIN                       3 // If low, print raw protocol data. Pin 2 is left for a future button.
+#define DIRECT_PIN                      4 // If low, data printed on LCD is not lowpass filtered.
 
 #define MODBUS_MINIMUM_FRAME_LENGTH     7 // 0x01 0x03 0x02 0x00 0x00 0xB8 0x44 - Reply of one 16 bit word
 #define MODBUS_REQUEST_FRAME_LENGTH     8 // /*ID*/ 0x01 /*FUNCTION*/ 0x03 /*ADDR*/ 0x00 0x13 /*NUMBER*/ 0x00 0x01 /*CRC*/ 0x75 0xCF
@@ -63,9 +64,9 @@ struct ModbusFrameInfoStruct {
 
 //bool sValuesPrinted = true;
 int16_t sPower[3];
-int16_t sPowerLowpass4[3];
+int16_t sPowerLowpass4[4];
 
-#define VERSION_EXAMPLE "0.9"
+#define VERSION_EXAMPLE "1.0"
 
 void dumpBuffer();
 void readModbusByte();
@@ -98,6 +99,7 @@ void setup() {
     digitalWrite(LED_BUILTIN, LOW);
 
     pinMode(DEBUG_PIN, INPUT_PULLUP);
+    pinMode(DIRECT_PIN, INPUT_PULLUP);
 
     Serial.begin(115200);
 
@@ -108,6 +110,7 @@ void setup() {
     Serial.println(F("START " __FILE__ "\r\nVersion " VERSION_EXAMPLE " from " __DATE__));
     Serial.println(F("Data is printed with 115200 baud during the 7 seconds gap between the logger requests."));
     Serial.println(F("If you connect debug pin " STR(DEBUG_PIN) " to ground, raw protocol data is printed"));
+    Serial.println(F("If you connect direct pin " STR(DIRECT_PIN) " to ground, data printed on LCD is not lowpass filtered."));
     Serial.println(F("Wait for 9600 baud modbus data on RX"));
 
     /*
@@ -138,6 +141,9 @@ void setup() {
         myLCD.print(F("Debug pin = " STR(DEBUG_PIN) "   "));
         delay(1000);
         myLCD.setCursor(0, 1);
+        myLCD.print(F("Direct pin = " STR(DIRECT_PIN) "  "));
+        delay(1000);
+        myLCD.setCursor(0, 1);
 #if defined(STANDALONE_TEST)
         myLCD.print(F("Standalone test "));
 #else
@@ -158,6 +164,7 @@ void setup() {
 /*
  * Check for 9600 baud signal at RX and store it in buffer.
  */
+bool sPrintNonFilteredValues;
 void loop() {
 
 #if defined(STANDALONE_TEST)
@@ -170,6 +177,7 @@ void loop() {
     delay(3000);
 #else
     bool tPrintBuffers = !digitalRead(DEBUG_PIN);
+    sPrintNonFilteredValues = !digitalRead(DIRECT_PIN);
 
 //    if (!sValuesPrinted
 //            && sModbusFrameInfo.RXBufferIndex
@@ -326,39 +334,42 @@ void printDataToSerialAndLCD() {
 }
 
 /*
- * 11 ms. 6 ms with delayMicroseconds(40); and 3.4 ms with delayMicroseconds(2) instead of delayMicroseconds(100);
- * commands need > 37us to settle
- * Called every MILLISECONDS_BETWEEN_LCD_OUTPUT (320 ms)
+ * Apply EMA lowpass alpha = 0.03125 | 1/32 to the values.
+ * Cutoff frequency is 0.051 Hz @10Hz.
+ * https://github.com/ArminJo/Arduino-Utils?tab=readme-ov-file#simpleemafilters
+ * Skip lowpass if delta is more than 12 % (guessed value),
+ * otherwise we see a slow increasing value at a power jump, caused by switching a load.
  */
-void print6DigitsWatt(int aWattToPrint) {
-    sprintf_P(sStringBufferForLCDRow, PSTR("%6d W"), aWattToPrint); // force use of 6 columns
+void printPowerToLCD(int16_t &aPowerLowpass5, int16_t aPower) {
+    if (!sPrintNonFilteredValues) {
+        if (abs(aPowerLowpass5 - aPower) > abs(aPowerLowpass5 / 4)) {
+            aPowerLowpass5 = aPower; // Fast response, reinitialize lowpass.
+            sprintf_P(sStringBufferForLCDRow, PSTR("%6d W"), aPowerLowpass5); // force use of 6 columns
+        } else {
+            aPowerLowpass5 += ((aPower - aPowerLowpass5) + (1 << 4)) >> 5; // 2.5 us, alpha = 1/32 0.03125, cutoff frequency 5.13 Hz @1kHz
+            sprintf_P(sStringBufferForLCDRow, PSTR("%6d_W"), aPowerLowpass5); // force use of 6 columns
+        }
+    } else {
+        aPowerLowpass5 = aPower; // Required for sum.
+        sprintf_P(sStringBufferForLCDRow, PSTR("%6d W"), aPower); // force use of 6 columns
+    }
+    /*
+     * 11 ms. 6 ms with delayMicroseconds(40); and 3.4 ms with delayMicroseconds(2) instead of delayMicroseconds(100);
+     * commands need > 37us to settle
+     * Called every MILLISECONDS_BETWEEN_LCD_OUTPUT (320 ms)
+     */
     myLCD.print(sStringBufferForLCDRow);
 }
 
 void printDataToLCD() {
     myLCD.setCursor(0, 0);
 
-    /*
-     * Apply EMA lowpass alpha = 0.0625 | 1/16 to the values.
-     * Cutoff frequency is 0.106 Hz @10Hz.
-     * https://github.com/ArminJo/Arduino-Utils?tab=readme-ov-file#simpleemafilters
-     * Skip lowpass if delta is more than 20 (guessed value),
-     * otherwise we see a slow increasing value at a power jump, caused by switching a load.
-     */
-    for (uint_fast8_t i = 0; i < 3; ++i) {
-        if (abs(sPowerLowpass4[i] - sPower[i]) > 20) {
-            sPowerLowpass4[i] = sPower[i]; // Fast response, reinitialize lowpass.
-        } else {
-            sPowerLowpass4[i] += ((sPower[i] - sPowerLowpass4[i]) + (1 << 3)) >> 4; // 2.2 us, alpha = 0.0625, cutoff frequency 10.6 Hz @1kHz
-        }
-    }
-
-    print6DigitsWatt(sPowerLowpass4[0]);
-    print6DigitsWatt(sPowerLowpass4[1]);
+    printPowerToLCD(sPowerLowpass4[0], sPower[0]);
+    printPowerToLCD(sPowerLowpass4[1], sPower[1]);
 
     myLCD.setCursor(0, 1);
-    print6DigitsWatt(sPowerLowpass4[2]);
-    print6DigitsWatt(sPowerLowpass4[0] + sPowerLowpass4[1] + sPowerLowpass4[2]); // Print sum of all
+    printPowerToLCD(sPowerLowpass4[2], sPower[2]);
+    printPowerToLCD(sPowerLowpass4[3], sPowerLowpass4[0] + sPowerLowpass4[1] + sPowerLowpass4[2]); // Print sum of all
 }
 
 void blinkForever() {
