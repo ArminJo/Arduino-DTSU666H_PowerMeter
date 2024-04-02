@@ -44,8 +44,11 @@
  * 7. After 40 ms do 20 ms phase A current measurement, which will also cover negative current. Multiply values with voltage.
  * 8. 20 ms for math and reply to RS485 or output to LCD until starting again at 80 ms - x ms.
  *
+ * In short notation:
+ * 0 ms: U phase A | 13.3 ms: I phase C | 26.6 ms: I phase B | 40 ms: I phase A | 50 ms: -I phase A | 60 ms: sending etc. | 80 ms: start again
+ *
  * Alternative timing for covering negative values of all 3 phases:
- * 13.3 | phase C | 20 ms, 40 | phase A | 20 ms, 66.6 phase B | 20 ms, 100 | voltage phase A | 113.3 ...
+ * 0 ms: U phase A | 13.3 ms: +/-I phase C | 40 ms: +/-I phase A | 66.6 ms: +/-I phase B | 86.6 ms sending etc. | 100 ms: start again
  *
  * The Deye inverter sends a 9600 baud modbus request 01 03  15 1E  00 06  A1 C2 every 100 ms to 120 ms.
  * We send the reply at pin 2 with software serial at a 80 ms raster.
@@ -80,11 +83,17 @@
 /*
  * Mapping of power phase A, B, C to ADC channels 1, 2, 3, which is also the internal index and display and modbus position.
  * The voltage input (ADC channel 0) must be from the line, which can be negative
- * Adapt it to your needs
+ * !!! Adapt it to your needs !!!
  */
+#if !defined(LINE_WHICH_CAN_BE_NEGATIVE)
 #define LINE_WHICH_CAN_BE_NEGATIVE      2 // (A) The internal index / channel of the power line, which can be negative
+#endif
+#if !defined(LINE_WITH_7_MS_DELAY)
 #define LINE_WITH_7_MS_DELAY            1 // (B) The internal index / channel of the power line, which is 6ms delayed to the line, which can be negative
+#endif
+#if !defined(LINE_WITH_13_MS_DELAY)
 #define LINE_WITH_13_MS_DELAY           3 // (C) The internal index / channel of the power line, which is 13.3 ms delayed to the line, which can be negative
+#endif
 
 #define ADC_CHANNEL_FOR_VOLTAGE     0
 
@@ -457,7 +466,7 @@ void setup() {
     TxToModbusClient.begin(MODBUS_BAUDRATE);
 
     /*
-     * Enable Watchdog of 8 s - 7 s at my CPU :-(
+     * Enable Watchdog of 8 s
      */
     wdt_enable(WDTO_8S);
 }
@@ -471,7 +480,7 @@ void loop() {
      * Read voltage of phase A
      */
     readVoltage(true);
-    sWatchdogResetInfoCharacter = 'A'; // Hangup at current measurement code
+    sWatchdogResetInfoCharacter = 'C'; // Hangup at current measurement code line C / 3
     TIMING_PIN_LOW();
 
     /*
@@ -496,8 +505,11 @@ void loop() {
     /*
      * Read current values and compute power of phase C
      */
-    int32_t tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WITH_13_MS_DELAY); // 3.396 ms
+    sWatchdogResetInfoCharacter = 'c'; // Hangup at current measurement code line C / 3
+    int32_t tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WITH_13_MS_DELAY); // at 3.396 ms
     TIMING_PIN_LOW();
+
+    sWatchdogResetInfoCharacter = 'B'; // Hangup at current measurement code line B / 2
 
     digitalWriteFast(LED_BUILTIN, HIGH); // To signal, that loop is still running
     /*
@@ -527,8 +539,11 @@ void loop() {
     /*
      * Read current values and compute power of phase B
      */
+    sWatchdogResetInfoCharacter = 'b'; // Hangup at current measurement code line B / 2
     tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WITH_7_MS_DELAY);
     TIMING_PIN_LOW();
+
+    sWatchdogResetInfoCharacter = 'A'; // Hangup at positive current measurement code line A / 1
 
     // prepare for next line reading
     ADMUX = LINE_WHICH_CAN_BE_NEGATIVE | (INTERNAL << SHIFT_VALUE_FOR_REFERENCE);
@@ -564,10 +579,13 @@ void loop() {
     /*
      * Read current values and compute power of reference phase A
      */
+    sWatchdogResetInfoCharacter = '+'; // Hangup at positive current measurement code line A / 1
     tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WHICH_CAN_BE_NEGATIVE);
     /*
      * Read negative half wave phase A, since this is the channel, where we may sell power
      */
+    sWatchdogResetInfoCharacter = '-'; // Hangup at negative current measurement code line A / 1
+
     tPowerRaw -= readCurrentRaw(tIndexOfCurrentToPrint == 0); // negative half wave of reference phase A is always stored in 0
     sWatchdogResetInfoCharacter = 'L'; // Hangup at loop() code
     TIMING_PIN_LOW();
