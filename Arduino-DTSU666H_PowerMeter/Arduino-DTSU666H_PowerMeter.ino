@@ -41,7 +41,7 @@
  * 4. Wait 3.3 ms.
  * 5. After 20 + 6.666 ms do 10 ms phase B current measurement. Multiply values with voltage.
  * 6. Wait 3.3 ms
- * 7. After 40 ms do 20 ms phase A current measurement, which will also cover negative current. Multiply values with voltage.
+ * 7. After 40 ms do 20 ms phase A current measurement, which will also cover negative current (which gives positive values at the last 10 ms). Multiply values with voltage.
  * 8. 20 ms for math and reply to RS485 or output to LCD until starting again at 80 ms - x ms.
  *
  * In short notation:
@@ -185,8 +185,8 @@ uint16_t calculateCrc(uint8_t *aBuffer, uint16_t aBufferLength);
 #define DURATION_OF_ONE_MEASUREMENT_MILLIS      60 // Cannot be changed! From start of voltage measurement to end of L1 negative current measurement
 #define DURATION_OF_ONE_LOOP_MILLIS             80 // Cannot be changed! One measurement and 20 ms for synchronizing voltage used for communication and print
 #define LOOPS_PER_MINUTE                        (60000 / DURATION_OF_ONE_LOOP_MILLIS)
-uint16_t sLastTCNT1;
-uint16_t sDeltaTCNT1; // Difference between two synchronizing points, with 26 us resolution because of ADC period of 26 us e.g. 79911, 79885, 79859
+uint16_t sLastTCNT1;    // Only for display on LCD
+uint16_t sDeltaTCNT1; // Only for display on LCD. Difference between two synchronizing points, with 26 us resolution because of ADC period of 26 us
 
 /*
  * LCD stuff
@@ -218,7 +218,7 @@ void printPaddedHexOnMyLCD(uint8_t aHexByteValue);
  */
 #include "SoftwareSerialTX.h"
 /*
- * Use a 115200 baud software serial for the short request frame.
+ * Use a 9600 baud software serial for the reply frames.
  * If available, we also can use a second hardware serial here :-).
  */
 SoftwareSerialTX TxToModbusClient(MODBUS_TX_PIN);
@@ -302,14 +302,19 @@ void handlePageButtonPress(bool aButtonToggleState __attribute__((unused))) {
         // Select phase to be plotted
         sIndexOfCurrentToPrint = ((sIndexOfCurrentToPrint + 1) & 0x03);    // increment the buffer to print an wrap at 4
     } else {
-        // switch LCD page. Long press handling for reset Energy page is in loop.
-        sLCDInfoPageCounter = 0;
-        sLCDDisplayPage++;
-        if (sLCDDisplayPage > POWER_METER_PAGE_MAX) {
-            sLCDDisplayPage = POWER_METER_PAGE_POWER;
-            // Clear watchdog flag position
-            myLCD.setCursor(0, 1);
-            myLCD.print(' ');
+        if (sCounterForDisplayFreeze != 0) {
+            // Do nothing, just reset display freeze
+            sCounterForDisplayFreeze = 0;
+        } else {
+            // switch LCD page. Long press handling for reset Energy page is in loop.
+            sLCDInfoPageCounter = 0;
+            sLCDDisplayPage++;
+            if (sLCDDisplayPage > POWER_METER_PAGE_MAX) {
+                sLCDDisplayPage = POWER_METER_PAGE_POWER;
+                // Clear watchdog flag position
+                myLCD.setCursor(0, 1);
+                myLCD.print(' ');
+            }
         }
     }
 }
@@ -414,7 +419,7 @@ void setup() {
 
     // Timer 1 for sample timing runs continuously in Normal mode
     TCCR1A = 0;
-    TCCR1B = _BV(CS11); // clock divider is 8
+    TCCR1B = _BV(CS11); // clock divider is 8 -> 2 MHz / 0.5 us. 32 ms / 30.51 Hz until overflow
     TIFR1 = 0; // Clear all compare flags
     TCNT1 = 0;
 
@@ -458,7 +463,7 @@ void setup() {
     Serial.flush();
     Serial.begin(MODBUS_BAUDRATE);
     while (Serial.available()) {
-        Serial.read();
+        Serial.read(); // skip spurious input
     }
     /*
      * 9600 baud soft serial to Modbus client. For serial from client we use the hardware Serial RX.
@@ -480,8 +485,8 @@ void loop() {
      * Read voltage of phase A
      */
     readVoltage(true);
-    sWatchdogResetInfoCharacter = 'C'; // Hangup at current measurement code line C / 3
     TIMING_PIN_LOW();
+    sWatchdogResetInfoCharacter = 'C'; // Hangup at current measurement code line C / 3
 
     /*
      * - Change ADC channel, set new timer compare value, and clear all timer compare flags.
@@ -491,7 +496,7 @@ void loop() {
     ADMUX = LINE_WITH_13_MS_DELAY | (INTERNAL << SHIFT_VALUE_FOR_REFERENCE);
     TIFR1 = _BV(OCF1A);  // Clear all timer compare flags
 
-    digitalWriteFast(LED_BUILTIN, LOW);
+    digitalWriteFast(LED_BUILTIN, LOW); // reset watt hour flash here
 
     uint8_t tIndexOfCurrentToPrint = 0xFF;  // Disable store to array
 
@@ -502,13 +507,13 @@ void loop() {
 
     loop_until_bit_is_set(TIFR1, OCF1A); // Wait for timer
     TIMING_PIN_HIGH();
-    /*
-     * Read current values and compute power of phase C
-     */
     sWatchdogResetInfoCharacter = 'c'; // Hangup at current measurement code line C / 3
+
+    /**************************************************
+     * Read current values and compute power of phase C
+     **************************************************/
     int32_t tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WITH_13_MS_DELAY); // at 3.396 ms
     TIMING_PIN_LOW();
-
     sWatchdogResetInfoCharacter = 'B'; // Hangup at current measurement code line B / 2
 
     digitalWriteFast(LED_BUILTIN, HIGH); // To signal, that loop is still running
@@ -536,13 +541,13 @@ void loop() {
     loop_until_bit_is_set(TIFR1, OCF1A);
 
     TIMING_PIN_HIGH(); // 3.34 ms
-    /*
-     * Read current values and compute power of phase B
-     */
     sWatchdogResetInfoCharacter = 'b'; // Hangup at current measurement code line B / 2
+
+    /**************************************************
+     * Read current values and compute power of phase B
+     **************************************************/
     tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WITH_7_MS_DELAY);
     TIMING_PIN_LOW();
-
     sWatchdogResetInfoCharacter = 'A'; // Hangup at positive current measurement code line A / 1
 
     // prepare for next line reading
@@ -573,22 +578,25 @@ void loop() {
     sLCDLoopCounter++;
     checkPowerCorrectionPins();
 
+    sWatchdogResetInfoCharacter = 'a'; // Hangup at wait before positive current measurement code line A / 1
     loop_until_bit_is_set(TIFR1, OCF1A);
 
     TIMING_PIN_HIGH(); // 3.34 ms
-    /*
-     * Read current values and compute power of reference phase A
-     */
     sWatchdogResetInfoCharacter = '+'; // Hangup at positive current measurement code line A / 1
-    tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WHICH_CAN_BE_NEGATIVE);
-    /*
-     * Read negative half wave phase A, since this is the channel, where we may sell power
-     */
-    sWatchdogResetInfoCharacter = '-'; // Hangup at negative current measurement code line A / 1
 
-    tPowerRaw -= readCurrentRaw(tIndexOfCurrentToPrint == 0); // negative half wave of reference phase A is always stored in 0
-    sWatchdogResetInfoCharacter = 'L'; // Hangup at loop() code
+    /************************************************************
+     * Read current values and compute power of reference phase A
+     ************************************************************/
+    tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WHICH_CAN_BE_NEGATIVE); // gives 0 for negative power
+
+    sWatchdogResetInfoCharacter = '-'; // Hangup at negative current measurement code line A / 1
+    /***************************************************
+     * Read the half wave phase A with negative voltage.
+     * If we sell power, we have positive current here.
+     ***************************************************/
+    tPowerRaw -= readCurrentRaw(tIndexOfCurrentToPrint == 0); // negative half wave of reference phase A is stored in 0
     TIMING_PIN_LOW();
+    sWatchdogResetInfoCharacter = 'L'; // Hangup at loop() code
 
     /*
      * fast actions
@@ -597,7 +605,7 @@ void loop() {
     enableMillisInterrupt(DURATION_OF_ONE_MEASUREMENT_MILLIS); // compensate for 60 ms of ADC reading
 
     /*
-     * Reset watchdog here
+     * Reset 8 s watchdog here
      */
     wdt_reset();
 
@@ -605,12 +613,16 @@ void loop() {
      * 60 ms of measurement are gone now, do computing and slow actions
      */
     if (sPowerCorrectionPercentage == 100) {
-        tPower = (tPowerRaw + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
+        if (tPowerRaw >= 0) {
+            tPower = (tPowerRaw + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
+        } else {
+            tPower = (tPowerRaw - (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
+        }
     } else {
         tPower = (((tPowerRaw / 100) * sPowerCorrectionPercentage) + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
     }
 
-    sPowerForLCDAccumulator[LINE_WHICH_CAN_BE_NEGATIVE - 1] += tPower;
+    sPowerForLCDAccumulator[LINE_WHICH_CAN_BE_NEGATIVE - 1] += tPower; // -1 for array index
     sPowerForModbusAccumulator[LINE_WHICH_CAN_BE_NEGATIVE - 1] += tPower;
     sEnergyAccumulator[LINE_WHICH_CAN_BE_NEGATIVE - 1] += tPower;
     sEnergyAccumulatorSumForFlash += tPower;
@@ -621,7 +633,7 @@ void loop() {
     if (sWattHourFlashCounter > 0) {
         sWattHourFlashCounter--;
         if (sWattHourFlashCounter == 0) {
-            digitalWriteFast(LED_BUILTIN, HIGH); // Flash again for 30 ms
+            digitalWriteFast(LED_BUILTIN, HIGH); // Flash again for 30 ms, i.e. until voltage reading of next loop
         }
     }
 
@@ -630,7 +642,7 @@ void loop() {
      */
     if (sEnergyAccumulatorSumForFlash > ENERGY_DIVISOR) {
         sEnergyAccumulatorSumForFlash -= ENERGY_DIVISOR;
-        digitalWriteFast(LED_BUILTIN, HIGH); // one 30 ms flash
+        digitalWriteFast(LED_BUILTIN, HIGH); // One 30 ms flash, i.e. until voltage reading of next loop
     } else if (sEnergyAccumulatorSumForFlash < -ENERGY_DIVISOR) {
         sEnergyAccumulatorSumForFlash += ENERGY_DIVISOR;
         sWattHourFlashCounter = 2; // 2 30 ms flashes on negative energy
@@ -645,7 +657,7 @@ void loop() {
 
     /*
      * Handle periodical print request.
-     * Must be before printDataOnLCD, because this resets the power value
+     * Must be before printDataOnLCD(), because this resets the power value
      */
     if (tPeriodicallyPrintIsEnabled) {
         checkAndPrintInputSignalValuesForArduinoPlotter();
@@ -869,7 +881,7 @@ void printDataOnLCD() {
          */
         // Mains period as measured by timer 1
         myLCD.print(F("Period = ")); // micro sign
-        myLCD.print((uint32_t) (sDeltaTCNT1 / 2) + (256L * 256L)); // We have one overflow in timer each 64 ms. 5 digits.
+        myLCD.print((uint32_t) (sDeltaTCNT1 / 2) + (256L * 256L)); // We have one overflow in timer each 32 ms. 5 digits.
         myLCD.print(F("\xE4s")); // micro sign
     }
 }
@@ -966,9 +978,10 @@ void readVoltage(bool aDoFindZeroCrossing) {
                  */
                 if (tValue != 0) {
                     if (tCounter >= 3) {
-                        sDeltaTCNT1 = TCNT1 - sLastTCNT1;
+                        sDeltaTCNT1 = TCNT1 - sLastTCNT1; // For display on LCD
                         sLastTCNT1 = TCNT1;
-                        OCR1A = TCNT1 + ((2 * 13333) - (3 * 26)); // set next compare to 13333 us after start of data. Timer has a resolution of 0.5 us.
+
+                        OCR1A = TCNT1 + ((13333 - (3 * 26)) * 2); // set next compare to 13333 us after start of non zero values. Timer has a resolution of 0.5 us.
                         disableMillisInterrupt(); // disable it here to have it exact 60 ms disabled
                         tDoSearchForStart = false;
                     }
