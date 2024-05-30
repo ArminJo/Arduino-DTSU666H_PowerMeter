@@ -5,6 +5,9 @@
  *  At address 0x15 1E Deye asks for 3 float power values in kW units.
  *  Measuring is done with an Arduino Nano and 3 30A CT's.
  *
+ *  This program is available on Wokwi https://wokwi.com/projects/399302567914368001,
+ *  but runs not totally correct due to bug https://github.com/wokwi/avr8js/issues/136
+ *
  *
  *  Copyright (C) 2023-2024  Armin Joachimsmeyer
  *  Email: armin.joachimsmeyer@gmail.com
@@ -57,7 +60,8 @@
  */
 
 /*
- * Every watt-hour, the build-in LED flashes for 80 ms (a complete measurement loop).
+ * Every watt-hour, the build-in LED flashes for 30 ms.
+ * During ever loop the LED flashes for a few microseconds as "alive" signal.
  *
  * There are 4 LCD pages
  * Power    Power in watt
@@ -79,6 +83,7 @@
 #include <avr/wdt.h>
 
 #define VERSION_EXAMPLE "1.2"
+//#define STANDALONE_TEST
 
 /*
  * Mapping of power phase A, B, C to ADC channels 1, 2, 3, which is also the internal index and display and modbus position.
@@ -255,8 +260,8 @@ uint32_t sMillisOfLastSerialPlotterOutput;
  * We sum 384 samples per measurement so here we have LSB of 12 mW / 384 = 0.0298 mW
  * 1 / 0.0298 = 33554
  */
-#define POWER_SCALE_DIVISOR         32768 // We take a power of 2 (and use correction percentage) instead of NUMBER_OF_SAMPLES_FOR_10_MILLIS / 0.00114 watt
-#define ENERGY_DIVISOR              ((3600L * 1000L) / DURATION_OF_ONE_LOOP_MILLIS) // 45000. 3600 seconds in a hour and 1000 ms / 80 ms samples per second
+#define POWER_SCALE_DIVISOR         32768 // We take a power of 2 instead of NUMBER_OF_SAMPLES_FOR_10_MILLIS / 0.00114 watt, because it is faster and only + 2.4%
+#define ENERGY_ACCUMULATOR_1_WATT_HOUR      ((3600L * 1000L) / DURATION_OF_ONE_LOOP_MILLIS) // 45000. 3600 seconds in a hour and 1000 ms / 80 ms samples per second
 /*
  * Power correction
  */
@@ -342,10 +347,10 @@ void setup() {
 
     initStackFreeMeasurement();
 
-// initialize the digital pin as an output.
+    // Initialize the digital pin as an output and set it to LOW
     pinMode(LED_BUILTIN, OUTPUT);
-
     digitalWrite(LED_BUILTIN, LOW);
+
     pinMode(POWER_CORRECTION_PLUS_PIN, INPUT_PULLUP);
     pinMode(POWER_CORRECTION_MINUS_PIN, INPUT_PULLUP);
     pinMode(ENABLE_ARDUINO_PLOTTER_OUTPUT_PIN, INPUT_PULLUP);
@@ -355,7 +360,7 @@ void setup() {
 
     // set up the LCD's number of columns and rows:
     myLCD.begin(LCD_COLUMNS, LCD_ROWS);
-    myLCD.print(F("Power meter " VERSION_EXAMPLE));
+    myLCD.print(F("Power Meter " VERSION_EXAMPLE));
 
     Serial.begin(115200);
 
@@ -388,10 +393,13 @@ void setup() {
 
     if (!digitalReadFast(ENABLE_ARDUINO_PLOTTER_OUTPUT_PIN)) {
         Serial.println(F("Serial plotter mode enabled"));
+        myLCD.setCursor(0, 1);
+        myLCD.print(F("Plotter mode on " STR(LINE_WHICH_CAN_BE_NEGATIVE)));
+        delay(2000); // delay to show LCD content
     } else {
         Serial.println(
                 F(
-                        "If you connect periodically print pin " STR(ENABLE_ARDUINO_PLOTTER_OUTPUT_PIN) " to ground, Serial plotter data is printed every " STR(MILLISECONDS_BETWEEN_SERIAL_PLOTTER_OUTPUT) " ms"));
+                        "If you connect \"periodically print\" pin " STR(ENABLE_ARDUINO_PLOTTER_OUTPUT_PIN) " to ground, Serial plotter data is printed every " STR(MILLISECONDS_BETWEEN_SERIAL_PLOTTER_OUTPUT) " ms"));
 #if defined(TIMING_DEBUG)
     Serial.println(            F(                    "Timing output is on pin " STR(TIMING_DEBUG_OUTPUT_PIN)));
 #endif
@@ -434,7 +442,7 @@ void setup() {
         digitalWriteFast(LED_BUILTIN, LOW);
         delay(450);
     }
-    delay(500);
+    delay(500); // To show "Power meter " VERSION_EXAMPLE for 2 seconds
 
     Serial.println();
     printRAMInfo(&Serial); // Stack used is 126 bytes
@@ -458,10 +466,12 @@ void setup() {
      * Switch Arduino Serial to MODBUS_BAUDRATE and clear bytes from receive buffer
      */
     Serial.println(F("Enable 8 s watchdog"));
-    Serial.println(F("First waiting for voltage at line" STR(LINE_WHICH_CAN_BE_NEGATIVE)));
+    Serial.println(F("First waiting for voltage at line " STR(LINE_WHICH_CAN_BE_NEGATIVE)));
     Serial.println();
     Serial.flush();
-    Serial.begin(MODBUS_BAUDRATE);
+#if !defined(STANDALONE_TEST)
+    Serial.begin(MODBUS_BAUDRATE); // this disables output in Wokwi
+#endif
     while (Serial.available()) {
         Serial.read(); // skip spurious input
     }
@@ -484,7 +494,11 @@ void loop() {
     /*
      * Read voltage of phase A
      */
+#if defined(STANDALONE_TEST)
+    readVoltage(false);
+#else
     readVoltage(true);
+#endif
     TIMING_PIN_LOW();
     sWatchdogResetInfoCharacter = 'C'; // Hangup at current measurement code line C / 3
 
@@ -632,7 +646,7 @@ void loop() {
      */
     if (sWattHourFlashCounter > 0) {
         sWattHourFlashCounter--;
-        if (sWattHourFlashCounter == 0) {
+        if (sWattHourFlashCounter > 0) {
             digitalWriteFast(LED_BUILTIN, HIGH); // Flash again for 30 ms, i.e. until voltage reading of next loop
         }
     }
@@ -640,11 +654,11 @@ void loop() {
     /*
      * Check for next watt-hour
      */
-    if (sEnergyAccumulatorSumForFlash > ENERGY_DIVISOR) {
-        sEnergyAccumulatorSumForFlash -= ENERGY_DIVISOR;
+    if (sEnergyAccumulatorSumForFlash > ENERGY_ACCUMULATOR_1_WATT_HOUR) {
+        sEnergyAccumulatorSumForFlash -= ENERGY_ACCUMULATOR_1_WATT_HOUR;
         digitalWriteFast(LED_BUILTIN, HIGH); // One 30 ms flash, i.e. until voltage reading of next loop
-    } else if (sEnergyAccumulatorSumForFlash < -ENERGY_DIVISOR) {
-        sEnergyAccumulatorSumForFlash += ENERGY_DIVISOR;
+    } else if (sEnergyAccumulatorSumForFlash < -ENERGY_ACCUMULATOR_1_WATT_HOUR) {
+        sEnergyAccumulatorSumForFlash += ENERGY_ACCUMULATOR_1_WATT_HOUR;
         sWattHourFlashCounter = 2; // 2 30 ms flashes on negative energy
         digitalWriteFast(LED_BUILTIN, HIGH);
     }
@@ -714,7 +728,9 @@ void checkPowerCorrectionPins() {
             /*
              * here one button just gets active or long press for more than 1 second -> change value
              */
-            Serial.begin(115200);
+#if !defined(STANDALONE_TEST)
+            Serial.begin(115200); // this disables output in Wokwi
+#endif
             if (tMinusActivated) {
                 sPowerCorrectionPercentage -= POWER_CORRECTION_PERCENTAGE_CHANGE_VALUE;
                 Serial.print(F("De"));
@@ -742,8 +758,9 @@ void checkPowerCorrectionPins() {
             myLCD.print(sPowerCorrectionPercentage);
             myLCD.print('%');
             Serial.flush();
-            Serial.begin(MODBUS_BAUDRATE);
-
+#if !defined(STANDALONE_TEST)
+            Serial.begin(MODBUS_BAUDRATE); // this disables output in Wokwi
+#endif
             sCounterForDisplayFreeze = LOOPS_OF_CORRECTION_MESSAGE_DISPLAY_FREEZE; // 3 seconds
         }
         s80MillisecondsAutorepeatCounter++;
@@ -762,7 +779,9 @@ void checkPowerCorrectionPins() {
 void checkAndPrintInputSignalValuesForArduinoPlotter() {
     if (millis() - sMillisOfLastSerialPlotterOutput >= MILLISECONDS_BETWEEN_SERIAL_PLOTTER_OUTPUT) {
         sMillisOfLastSerialPlotterOutput = millis(); // set for next check
-        Serial.begin(115200);
+#if !defined(STANDALONE_TEST)
+        Serial.begin(115200); // this disables output in Wokwi
+#endif
         Serial.print(F("Voltage Current_x_10_Line_"));
         auto tIndexOfCurrentToPrint = sIndexOfCurrentToPrint;
         Serial.print(tIndexOfCurrentToPrint);
@@ -781,7 +800,9 @@ void checkAndPrintInputSignalValuesForArduinoPlotter() {
         }
         Serial.println();
         Serial.flush();
-        Serial.begin(MODBUS_BAUDRATE);
+#if !defined(STANDALONE_TEST)
+        Serial.begin(MODBUS_BAUDRATE); // this disables output in Wokwi
+#endif
     }
 }
 
@@ -841,15 +862,15 @@ void printDataOnLCD() {
 
     } else if (sLCDDisplayPage == POWER_METER_PAGE_ENERGY) {
         /*
-         * ENERGY_DIVISOR is 45000 so we have only 16 bit resolution after division
+         * ENERGY_ACCUMULATOR_1_WATT_HOUR is 45000 so we have only 16 bit resolution after division
          */
-        int16_t tEnergyL1 = sEnergyAccumulator[0] / ENERGY_DIVISOR;
-        int16_t tEnergyL2 = sEnergyAccumulator[1] / ENERGY_DIVISOR;
+        int16_t tEnergyL1 = sEnergyAccumulator[0] / ENERGY_ACCUMULATOR_1_WATT_HOUR;
+        int16_t tEnergyL2 = sEnergyAccumulator[1] / ENERGY_ACCUMULATOR_1_WATT_HOUR;
         sprintf_P(sStringBufferForLCDRow, PSTR("%6dWh%6dWh"), tEnergyL1, tEnergyL2); // force use of 6 columns
         myLCD.print(sStringBufferForLCDRow);
 
         // Second line. L3 and Sum energy
-        int16_t tEnergyL3 = sEnergyAccumulator[2] / ENERGY_DIVISOR;
+        int16_t tEnergyL3 = sEnergyAccumulator[2] / ENERGY_ACCUMULATOR_1_WATT_HOUR;
         if (sCounterForDisplayFreeze == 0) {
             int16_t tEnergySum = tEnergyL1 + tEnergyL2 + tEnergyL3;
             sprintf_P(sStringBufferForLCDRow, PSTR("%6dWh%6dWh"), tEnergyL3, tEnergySum); // force use of 6 columns

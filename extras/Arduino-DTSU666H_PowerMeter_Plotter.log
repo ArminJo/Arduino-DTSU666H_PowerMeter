@@ -1,6 +1,13 @@
 START ../src/Arduino-DTSU666H_PowerMeter.cpp
-Version 1.0 from Sep 19 2023_
+Version 1.2 from May 30 2024_
 Serial plotter mode enabled
+Size of Data + BSS / Heap start=0x773 | 1907
+Currently available Heap=7
+Stack used 98 of 141
+
+Enable 8 s watchdog
+First waiting for voltage at line 2
+
 Voltage Current_x_10_Line_1 Power_of_Line1_is_5
 4 0
 11 0

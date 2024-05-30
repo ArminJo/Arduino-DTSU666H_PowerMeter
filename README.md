@@ -87,6 +87,13 @@ Sometimes the Deye sends the request, while we do a reply.
 
 <br/>
 
+# Example on Wokwi
+Also usable as connection schematic.
+
+- [Wokwi Arduino-DTSU666H_PowerMeter](https://wokwi.com/projects/399302567914368001).
+
+ <br/>
+ 
 # Screenshots
 ## LCD pages
 | Power page | Energy page |
