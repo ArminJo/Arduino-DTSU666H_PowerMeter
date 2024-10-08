@@ -7,6 +7,13 @@
  *  Because Modbus protocol is a master slave one, we can listen to the TX and RX of the communication
  *  by connecting both with a schottky diode to the Arduino RX pin.
  *
+ * Apply EMA lowpass alpha = 0.03125 | 1/32 to the power values.
+ * Cutoff frequency is 0.051 Hz @10Hz.
+ * https://github.com/ArminJo/Arduino-Utils?tab=readme-ov-file#simpleemafilters
+ * Skip lowpass if delta is more than 12 % (guessed value),
+ * otherwise we see a slow increasing value at a power jump, caused by switching a load.
+ * The character '_' indicates a filtered value
+ *
  *
  *  Copyright (C) 2023-2024  Armin Joachimsmeyer
  *  Email: armin.joachimsmeyer@gmail.com
@@ -31,8 +38,10 @@
 
 #include "LongUnion.h"
 
-#define MODBUS_BAUDRATE              9600
-//#define STANDALONE_TEST                   // If activated, random power is displayed on LCD.
+#define VERSION_EXAMPLE "1.2"
+
+#define MODBUS_BAUDRATE                 9600
+//#define STANDALONE_TEST               // If activated, random power is displayed on LCD.
 #define DEBUG_PIN                       3 // If low, print raw protocol data. Pin 2 is left for a future button.
 #define DIRECT_PIN                      4 // If low, data printed on LCD is not lowpass filtered.
 
@@ -66,7 +75,6 @@ struct ModbusFrameInfoStruct {
 int16_t sPower[3];
 int16_t sPowerLowpass4[4];
 
-#define VERSION_EXAMPLE "1.0"
 
 void dumpBuffer();
 void readModbusByte();
@@ -103,7 +111,8 @@ void setup() {
 
     Serial.begin(115200);
 
-#if defined(__AVR_ATmega32U4__) || defined(SERIAL_PORT_USBVIRTUAL) || defined(SERIAL_USB) /*stm32duino*/|| defined(USBCON) /*STM32_stm32*/|| defined(SERIALUSB_PID) || defined(ARDUINO_attiny3217)
+#if defined(__AVR_ATmega32U4__) || defined(SERIAL_PORT_USBVIRTUAL) || defined(SERIAL_USB) /*stm32duino*/|| defined(USBCON) /*STM32_stm32*/ \
+    || defined(SERIALUSB_PID)  || defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_attiny3217)
     delay(4000); // To be able to connect Serial monitor after reset or power up and before first print out. Do not wait for an attached Serial Monitor!
 #endif
     // Just to know which program is running on my Arduino
@@ -334,11 +343,12 @@ void printDataToSerialAndLCD() {
 }
 
 /*
- * Apply EMA lowpass alpha = 0.03125 | 1/32 to the values.
+ * Apply EMA lowpass alpha = 0.03125 | 1/32 to the power values.
  * Cutoff frequency is 0.051 Hz @10Hz.
  * https://github.com/ArminJo/Arduino-Utils?tab=readme-ov-file#simpleemafilters
  * Skip lowpass if delta is more than 12 % (guessed value),
  * otherwise we see a slow increasing value at a power jump, caused by switching a load.
+ * The character '_' indicates a filtered value
  */
 void printPowerToLCD(int16_t &aPowerLowpass5, int16_t aPower) {
     if (!sPrintNonFilteredValues) {
@@ -370,6 +380,11 @@ void printDataToLCD() {
     myLCD.setCursor(0, 1);
     printPowerToLCD(sPowerLowpass4[2], sPower[2]);
     printPowerToLCD(sPowerLowpass4[3], sPowerLowpass4[0] + sPowerLowpass4[1] + sPowerLowpass4[2]); // Print sum of all
+    if (sPrintNonFilteredValues) {
+        myLCD.setCursor(0, 1);
+        myLCD.print('U'); // Direct/Unfiltered values requested
+    }
+
 }
 
 void blinkForever() {

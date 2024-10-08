@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "author": "Armin",
+  "author": "ArminJo",
   "editor": "wokwi",
   "parts": [
     { "type": "wokwi-arduino-nano", "id": "nano", "top": 24, "left": 9.1, "attrs": {} },
@@ -15,9 +15,9 @@
     {
       "type": "wokwi-text",
       "id": "btn1text",
-      "top": 124,
-      "left": 211,
-      "attrs": { "text": "Voltage." }
+      "top": 124.8,
+      "left": 211.2,
+      "attrs": { "text": "Voltage" }
     },
     {
       "type": "wokwi-slide-potentiometer",

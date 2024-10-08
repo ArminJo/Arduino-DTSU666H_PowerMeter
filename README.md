@@ -166,6 +166,8 @@ HIGH VOLTAGE - DANGER - use heat-shrink tubing
 Download and extract the repository. In the Arduino IDE open the sketch with File -> Open... and select the Arduino-DTSU666H_PowerMeter folder.<br/>
 All libraries, especially the modified ones, are included in this project.
 
+If you burn the Optiboot bootloader on the Nano, the reboot flags are available at startup and the (watchdog) reboot reason character can be displayed.
+
 <br/>
 
 # Libraries used
@@ -203,7 +205,16 @@ This program uses the following libraries, which are already included in this re
 
 # Revision History
 
+### Version 1.2
+- Improved button handling.
+- 2 flashes on negative energy.
+- Added Optiboot 8.1 for improved watchdog handling.
+- Added macro STANDALONE_TEST.
+- DTSU666ModbusSniffer - added direct_pin input to show non lowpass filtered data.
+
 ### Version 1.1
+- Fix LCD power-sum bug.
+- Error handling and watchdog added to improve stability.
 - Added reply to 0x2014 (Power in 0.1 W units) and 0x0006 (Current transformer rate IrAt).
 
 ### Version 1.0
