@@ -9,7 +9,7 @@
  *  but runs not totally correct due to bug https://github.com/wokwi/avr8js/issues/136
  *
  *
- *  Copyright (C) 2023-2024  Armin Joachimsmeyer
+ *  Copyright (C) 2023-2025  Armin Joachimsmeyer
  *  Email: armin.joachimsmeyer@gmail.com
  *
  *  This file is part of Arduino-DTSU666H_PowerMeter https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter.
@@ -34,9 +34,10 @@
  * We assume, that voltage waveform of the 3 phases are equal and negative and positive values are symmetric
  * so we take only one half wave as voltage reference.
  *
- * Phase A (L1) is reference (the one, which supplies the voltage and which can be negative),
- *   phase B has a delay of 6.6 ms / 120 degree and C a delay of 13.3 ms / 240 degree.
+ * Definitions: Phase A (L1) is the reference (the one, that supplies the voltage and which can be negative),
+ *   phase B has a delay of 6.6 ms / 120 degrees and C has a delay of 13.3 ms / 240 degrees.
  *
+ * Program flow:
  * 1. Read "positive" part voltage values of phase A for 10 ms and store 385 values in RAM to be used as reference for all 3 phases.
  *    This starts 16 Bit timer 1 to keep track of the phase for the next current measurements.
  * 2. Wait 3.3 ms.
@@ -64,7 +65,7 @@
  * During ever loop the LED flashes for a few microseconds as "alive" signal.
  *
  * There are 4 LCD pages
- * Power    Power in watt
+ * Power    Power in watt - Power value for 30 A * 230 V = 6,9 kW
  * Energy   Energy in watt-hour
  * Info     Time for energy and power correction percentage.
  * Extra    Period of one loop which is 4 mains phases, around 80 ms.
@@ -82,9 +83,11 @@
 #include "LiquidCrystal.h"
 #include <avr/wdt.h>
 
-#define VERSION_EXAMPLE "1.2"
-//#define STANDALONE_TEST
+#define VERSION_EXAMPLE "1.3"
+//#define STANDALONE_TEST // Do not wait for zero crossing of voltage and leave reference voltage at VCC
+//#define TRACE
 
+#define ADC_CHANNEL_FOR_VOLTAGE         0
 /*
  * Mapping of power phase A, B, C to ADC channels 1, 2, 3, which is also the internal index and display and modbus position.
  * The voltage input (ADC channel 0) must be from the line, which can be negative
@@ -100,12 +103,14 @@
 #define LINE_WITH_13_MS_DELAY           3 // (C) The internal index / channel of the power line, which is 13.3 ms delayed to the line, which can be negative
 #endif
 
-#define ADC_CHANNEL_FOR_VOLTAGE     0
-
 //#define TIMING_DEBUG  Output Timing waveform at pin A5
+
 /*
  * Modbus stuff
  */
+#if defined(STANDALONE_TEST)
+#define DISABLE_MODBUS
+#endif
 struct ModbusRTURequestStruct {
     uint8_t SlaveAddress;
     uint8_t FunctionCode; // 03 -> Read Multiple Registers
@@ -189,7 +194,7 @@ uint16_t calculateCrc(uint8_t *aBuffer, uint16_t aBufferLength);
 
 #define DURATION_OF_ONE_MEASUREMENT_MILLIS      60 // Cannot be changed! From start of voltage measurement to end of L1 negative current measurement
 #define DURATION_OF_ONE_LOOP_MILLIS             80 // Cannot be changed! One measurement and 20 ms for synchronizing voltage used for communication and print
-#define LOOPS_PER_MINUTE                        (60000 / DURATION_OF_ONE_LOOP_MILLIS)
+#define LOOPS_PER_MINUTE                        (60000 / DURATION_OF_ONE_LOOP_MILLIS) // 750
 uint16_t sLastTCNT1;    // Only for display on LCD
 uint16_t sDeltaTCNT1; // Only for display on LCD. Difference between two synchronizing points, with 26 us resolution because of ADC period of 26 us
 
@@ -204,7 +209,7 @@ LiquidCrystal myLCD(11, 12, 7, 8, 9, 10); // Pins 7 to 12
 void printDataOnLCD();                  // Called every MILLISECONDS_BETWEEN_LCD_OUTPUT
 
 uint32_t sMillisOfLastLCDOutput;
-char sStringBufferForLCDRow[17];        // For rendering LCD lines with sprintf()
+char sStringBufferForLCDRow[17];        // For rendering LCD lines with snprintf_P()
 uint8_t sLCDInfoPageCounter;            // To update Info page only once every 20.5 seconds
 /*
  * Counts 12 per second.
@@ -232,12 +237,15 @@ SoftwareSerialTX TxToModbusClient(MODBUS_TX_PIN);
  * For power data acquisition
  * for LCD we accumulate up to 10 periods, so we have an overflow above around 3.2 kW if we use int16_t
  */
-uint8_t sNumberOfPowerSamplesForLCD;    //
+uint8_t sNumberOfPowerSamplesForLCD;    // should be at least 8, see definition of MILLISECONDS_BETWEEN_LCD_OUTPUT
 int32_t sPowerForLCDAccumulator[3]; // Index 0 is for L1, 1 is for L2 at ADC channel 2 etc. We can have up to 10 samples before displayed on LCD.
 uint8_t sNumberOfPowerSamplesForModbus;
 int32_t sPowerForModbusAccumulator[3];  // Index 0 is for L1, 1 is for L2 at ADC channel 2 etc.
 
-int32_t sEnergyAccumulator[3];          // Contains sum of sNumberOfSamplesForEnergy entries of power
+/*
+ * Use 64 bit value here, since the divisor for Wh is 45000 and we want to see more than 47 kWh at page ENERGY
+ */
+int64_t sEnergyAccumulator[3];          // Contains sum of sNumberOfSamplesForEnergy entries of power
 int32_t sEnergyAccumulatorSumForFlash;
 uint8_t sWattHourFlashCounter;
 uint32_t sNumberOfEnergySamplesForLCD;
@@ -249,6 +257,7 @@ int16_t sPowerSum;
  * Place this array at end of BSS to be first overwritten by stack. Only one array available for printing of current.
  */
 uint16_t sCurrentArray[NUMBER_OF_SAMPLES_FOR_10_MILLIS] __attribute__((section(".noinit")));
+#define INDEX_OF_NEGATIVE_CURRENT       0 // negative half wave of reference phase A is stored in index 0
 uint16_t sVoltageArray[NUMBER_OF_SAMPLES_FOR_10_MILLIS];
 
 #define MILLISECONDS_BETWEEN_SERIAL_PLOTTER_OUTPUT     2000
@@ -257,10 +266,12 @@ uint32_t sMillisOfLastSerialPlotterOutput;
 /*
  * Assume current full range (1.1 V) at 30 A and voltage full range at 400 V with divider 3.63 MOhm to 10 kOhm.
  * => current LSB is 29 mA and voltage LSB is 390.6 mV => Power LSB is 11.4 mW
+ * Power value for 30 A * 230 V = 6,9 kW
  * We sum 384 samples per measurement so here we have LSB of 12 mW / 384 = 0.0298 mW
  * 1 / 0.0298 = 33554
  */
-#define POWER_SCALE_DIVISOR         32768 // We take a power of 2 instead of NUMBER_OF_SAMPLES_FOR_10_MILLIS / 0.00114 watt, because it is faster and only + 2.4%
+#define POWER_SCALE_DIVISOR         33554
+//#define POWER_SCALE_DIVISOR         32768 // We take a power of 2 instead of NUMBER_OF_SAMPLES_FOR_10_MILLIS / 0.00114 watt, because it is faster and only + 2.4%
 #define ENERGY_ACCUMULATOR_1_WATT_HOUR      ((3600L * 1000L) / DURATION_OF_ONE_LOOP_MILLIS) // 45000. 3600 seconds in a hour and 1000 ms / 80 ms samples per second
 /*
  * Power correction
@@ -300,29 +311,7 @@ volatile uint8_t sLCDDisplayPage = POWER_METER_PAGE_POWER;
 
 #include "EasyButtonAtInt01.hpp"
 #define LONG_PRESS_BUTTON_DURATION_MILLIS   1000
-
-void handlePageButtonPress(bool aButtonToggleState __attribute__((unused))) {
-    sPageButtonJustPressed = true;
-    if (!digitalReadFast(ENABLE_ARDUINO_PLOTTER_OUTPUT_PIN)) {
-        // Select phase to be plotted
-        sIndexOfCurrentToPrint = ((sIndexOfCurrentToPrint + 1) & 0x03);    // increment the buffer to print an wrap at 4
-    } else {
-        if (sCounterForDisplayFreeze != 0) {
-            // Do nothing, just reset display freeze
-            sCounterForDisplayFreeze = 0;
-        } else {
-            // switch LCD page. Long press handling for reset Energy page is in loop.
-            sLCDInfoPageCounter = 0;
-            sLCDDisplayPage++;
-            if (sLCDDisplayPage > POWER_METER_PAGE_MAX) {
-                sLCDDisplayPage = POWER_METER_PAGE_POWER;
-                // Clear watchdog flag position
-                myLCD.setCursor(0, 1);
-                myLCD.print(' ');
-            }
-        }
-    }
-}
+void handlePageButtonPress(bool aButtonToggleState);
 EasyButton PageButtonAtPin3(&handlePageButtonPress); // Button is connected to INT1
 
 uint8_t sMCUSRStored; // content of MCUSR register at startup
@@ -392,6 +381,12 @@ void setup() {
         eeprom_write_byte(&sPowerCorrectionPercentageEeprom, sPowerCorrectionPercentage);
     }
 
+#if defined(STANDALONE_TEST)
+    myLCD.setCursor(0, 1);
+    myLCD.print(F("Standalone test"));
+    delay(2000); // delay to show LCD content
+#endif
+
     if (!digitalReadFast(ENABLE_ARDUINO_PLOTTER_OUTPUT_PIN)) {
         Serial.println(F("Serial plotter mode enabled"));
         myLCD.setCursor(0, 1);
@@ -432,7 +427,11 @@ void setup() {
     TIFR1 = 0; // Clear all compare flags
     TCNT1 = 0;
 
-    ADMUX = ADC_CHANNEL_FOR_VOLTAGE | (INTERNAL << SHIFT_VALUE_FOR_REFERENCE);
+#if defined(STANDALONE_TEST)
+    ADMUX = ADC_CHANNEL_FOR_VOLTAGE | (DEFAULT << SHIFT_VALUE_FOR_REFERENCE); // Leave reference at 5 V
+#else
+    ADMUX = ADC_CHANNEL_FOR_VOLTAGE | (INTERNAL << SHIFT_VALUE_FOR_REFERENCE); // Set reference to 1.1 volt
+#endif
 
     /*
      * Wait 2 seconds to show LCD content and blink 3 times to indicate booting
@@ -470,16 +469,16 @@ void setup() {
     Serial.println(F("First waiting for voltage at line " STR(LINE_WHICH_CAN_BE_NEGATIVE)));
     Serial.println();
     Serial.flush();
-#if !defined(STANDALONE_TEST)
+#if !defined(DISABLE_MODBUS)
     Serial.begin(MODBUS_BAUDRATE); // this disables output in Wokwi
-#endif
     while (Serial.available()) {
-        Serial.read(); // skip spurious input
+        Serial.read(); // skip spurious input from Modbus
     }
     /*
      * 9600 baud soft serial to Modbus client. For serial from client we use the hardware Serial RX.
      */
     TxToModbusClient.begin(MODBUS_BAUDRATE);
+#endif
 
     /*
      * Enable Watchdog of 8 s
@@ -496,7 +495,7 @@ void loop() {
      * Read voltage of phase A
      */
 #if defined(STANDALONE_TEST)
-    readVoltage(false);
+    readVoltage(false); // Do not wait for zero crossing of voltage
 #else
     readVoltage(true);
 #endif
@@ -508,7 +507,11 @@ void loop() {
      * - Wait for timer
      * - Read current and compute power for 10 ms.
      */
-    ADMUX = LINE_WITH_13_MS_DELAY | (INTERNAL << SHIFT_VALUE_FOR_REFERENCE);
+#if defined(STANDALONE_TEST)
+    ADMUX = LINE_WITH_13_MS_DELAY | (DEFAULT << SHIFT_VALUE_FOR_REFERENCE); // Leave reference at 5 V
+#else
+    ADMUX = LINE_WITH_13_MS_DELAY | (INTERNAL << SHIFT_VALUE_FOR_REFERENCE); // Set reference to 1.1 volt
+#endif
     TIFR1 = _BV(OCF1A);  // Clear all timer compare flags
 
     digitalWriteFast(LED_BUILTIN, LOW); // reset watt hour flash here
@@ -527,7 +530,7 @@ void loop() {
     /**************************************************
      * Read current values and compute power of phase C
      **************************************************/
-    int32_t tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WITH_13_MS_DELAY); // at 3.396 ms
+    int32_t tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WITH_13_MS_DELAY); // at 3.396 ms. Maximum is 2^29 and fits in signed long
     TIMING_PIN_LOW();
     sWatchdogResetInfoCharacter = 'B'; // Hangup at current measurement code line B / 2
 
@@ -537,15 +540,22 @@ void loop() {
      * - Wait for timer
      * - Read current and compute power for 10 ms.
      */
-    ADMUX = LINE_WITH_7_MS_DELAY | (INTERNAL << SHIFT_VALUE_FOR_REFERENCE);
+#if defined(STANDALONE_TEST)
+    ADMUX = LINE_WITH_7_MS_DELAY | (DEFAULT << SHIFT_VALUE_FOR_REFERENCE); // Leave reference at 5 V
+#else
+    ADMUX = LINE_WITH_7_MS_DELAY | (INTERNAL << SHIFT_VALUE_FOR_REFERENCE); // Set reference to 1.1 volt
+#endif
     OCR1A = OCR1A + (2 * 13333); // set next compare to 13333 us after last compare. Timer has a resolution of 0.5 us.
     TIFR1 = _BV(OCF1A);  // Clear all timer compare flags
-    // Store values for with 13.3 ms delay now
-    int16_t tPower;
+    /*
+     * Store values for phase C
+     * We have 3.3 ms for all the code between 2 readCurrentRaw()
+     */
+    int16_t tPower; // Theoretical maximum is 11977 i.e. 11.977 kW, practical maximum is 30 A *230 V = 6,9 kW
     if (sPowerCorrectionPercentage == 100) {
-        tPower = (tPowerRaw + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
+        tPower = (tPowerRaw + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // if 32768, then  shift by 15 -> 12 us
     } else {
-        tPower = (((tPowerRaw / 100) * sPowerCorrectionPercentage) + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
+        tPower = (((tPowerRaw / 100) * sPowerCorrectionPercentage) + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR;
     }
     digitalWriteFast(LED_BUILTIN, LOW); // To signal, that loop is still running
 
@@ -553,9 +563,12 @@ void loop() {
     sPowerForModbusAccumulator[LINE_WITH_13_MS_DELAY - 1] += tPower;
     sEnergyAccumulator[LINE_WITH_13_MS_DELAY - 1] += tPower;
     sEnergyAccumulatorSumForFlash += tPower;
-    loop_until_bit_is_set(TIFR1, OCF1A);
 
-    TIMING_PIN_HIGH(); // 3.34 ms
+    /*
+     * Wait for timer to trigger, i.e. wait for the end of the 3.3 ms gap
+     */
+    loop_until_bit_is_set(TIFR1, OCF1A);
+    TIMING_PIN_HIGH();
     sWatchdogResetInfoCharacter = 'b'; // Hangup at current measurement code line B / 2
 
     /**************************************************
@@ -566,19 +579,34 @@ void loop() {
     sWatchdogResetInfoCharacter = 'A'; // Hangup at positive current measurement code line A / 1
 
     // prepare for next line reading
-    ADMUX = LINE_WHICH_CAN_BE_NEGATIVE | (INTERNAL << SHIFT_VALUE_FOR_REFERENCE);
+#if defined(STANDALONE_TEST)
+    ADMUX = LINE_WHICH_CAN_BE_NEGATIVE | (DEFAULT << SHIFT_VALUE_FOR_REFERENCE); // Leave reference at 5 V
+#else
+    ADMUX = LINE_WHICH_CAN_BE_NEGATIVE | (INTERNAL << SHIFT_VALUE_FOR_REFERENCE); // Set reference to 1.1 volt
+#endif
     ADCSRA = ((1 << ADEN) | (1 << ADIF) | ADC_PRESCALE32);
     OCR1A = OCR1A + (2 * 13333); // set next compare to 13333 us after last compare. Timer has a resolution of 0.5 us.
     TIFR1 = _BV(OCF1A);  // Clear all timer compare flags
 
-    // Store values for line with 6.6 ms delay now
+    // Store values for phase B with 6.6 ms delay now
     if (sPowerCorrectionPercentage == 100) {
         tPower = (tPowerRaw + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
     } else {
         tPower = (((tPowerRaw / 100) * sPowerCorrectionPercentage) + (POWER_SCALE_DIVISOR / 2)) / POWER_SCALE_DIVISOR; // shift by 15 -> 12 us
     }
 
-    sPowerForLCDAccumulator[LINE_WITH_7_MS_DELAY - 1] += tPower;
+#if defined(TRACE)
+    Serial.print(sNumberOfPowerSamplesForLCD);
+    Serial.print(F("*"));
+    Serial.print(tPower);
+    Serial.print(F("="));
+    Serial.print(sPowerForLCDAccumulator[0]);
+    Serial.print(F(" "));
+    Serial.print(tPowerRaw); // 401 867 136
+    Serial.print(F(" | "));
+#endif
+
+    sPowerForLCDAccumulator[LINE_WITH_7_MS_DELAY - 1] += tPower; // [0]
     sPowerForModbusAccumulator[LINE_WITH_7_MS_DELAY - 1] += tPower;
     sEnergyAccumulator[LINE_WITH_7_MS_DELAY - 1] += tPower;
     sEnergyAccumulatorSumForFlash += tPower;
@@ -596,27 +624,38 @@ void loop() {
     sWatchdogResetInfoCharacter = 'a'; // Hangup at wait before positive current measurement code line A / 1
     loop_until_bit_is_set(TIFR1, OCF1A);
 
-    TIMING_PIN_HIGH(); // 3.34 ms
+    /*
+     * Wait for timer to trigger, i.e. wait for the end of the 3.3 ms gap
+     */
+    TIMING_PIN_HIGH();
     sWatchdogResetInfoCharacter = '+'; // Hangup at positive current measurement code line A / 1
 
     /************************************************************
      * Read current values and compute power of reference phase A
      ************************************************************/
+#if defined(STANDALONE_TEST)
+    tPowerRaw = 0; // Force negative values for this phase
+#else
     tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WHICH_CAN_BE_NEGATIVE); // gives 0 for negative power
+#endif
 
     sWatchdogResetInfoCharacter = '-'; // Hangup at negative current measurement code line A / 1
     /***************************************************
      * Read the half wave phase A with negative voltage.
      * If we sell power, we have positive current here.
      ***************************************************/
-    tPowerRaw -= readCurrentRaw(tIndexOfCurrentToPrint == 0); // negative half wave of reference phase A is stored in 0
+    tPowerRaw -= readCurrentRaw(tIndexOfCurrentToPrint == INDEX_OF_NEGATIVE_CURRENT); // negative half wave of reference phase A is stored in index 0
     TIMING_PIN_LOW();
     sWatchdogResetInfoCharacter = 'L'; // Hangup at loop() code
 
     /*
      * fast actions
      */
-    ADMUX = ADC_CHANNEL_FOR_VOLTAGE | (INTERNAL << SHIFT_VALUE_FOR_REFERENCE); // prepare for next reading voltage
+#if defined(STANDALONE_TEST)
+    ADMUX = ADC_CHANNEL_FOR_VOLTAGE | (DEFAULT << SHIFT_VALUE_FOR_REFERENCE); // Leave reference at 5 V
+#else
+    ADMUX = ADC_CHANNEL_FOR_VOLTAGE | (INTERNAL << SHIFT_VALUE_FOR_REFERENCE); // prepare for next reading of voltage
+#endif
     enableMillisInterrupt(DURATION_OF_ONE_MEASUREMENT_MILLIS); // compensate for 60 ms of ADC reading
 
     /*
@@ -759,7 +798,7 @@ void checkPowerCorrectionPins() {
             myLCD.print(sPowerCorrectionPercentage);
             myLCD.print('%');
             Serial.flush();
-#if !defined(STANDALONE_TEST)
+#if !defined(DISABLE_MODBUS)
             Serial.begin(MODBUS_BAUDRATE); // this disables output in Wokwi
 #endif
             sCounterForDisplayFreeze = LOOPS_OF_CORRECTION_MESSAGE_DISPLAY_FREEZE; // 3 seconds
@@ -801,9 +840,32 @@ void checkAndPrintInputSignalValuesForArduinoPlotter() {
         }
         Serial.println();
         Serial.flush();
-#if !defined(STANDALONE_TEST)
+#if !defined(DISABLE_MODBUS)
         Serial.begin(MODBUS_BAUDRATE); // this disables output in Wokwi
 #endif
+    }
+}
+
+void handlePageButtonPress(bool aButtonToggleState __attribute__((unused))) {
+    sPageButtonJustPressed = true;
+    if (!digitalReadFast(ENABLE_ARDUINO_PLOTTER_OUTPUT_PIN)) {
+        // Select phase to be plotted
+        sIndexOfCurrentToPrint = ((sIndexOfCurrentToPrint + 1) & 0x03);    // increment the buffer to print an wrap at 4
+    } else {
+        if (sCounterForDisplayFreeze != 0) {
+            // Do nothing, just reset display freeze
+            sCounterForDisplayFreeze = 0;
+        } else {
+            // switch LCD page. Long press handling for reset Energy page is in loop.
+            sLCDInfoPageCounter = 0;
+            sLCDDisplayPage++;
+            if (sLCDDisplayPage > POWER_METER_PAGE_MAX) {
+                sLCDDisplayPage = POWER_METER_PAGE_POWER;
+                // Clear watchdog flag position
+                myLCD.setCursor(0, 1);
+                myLCD.print(' ');
+            }
+        }
     }
 }
 
@@ -828,7 +890,7 @@ void printCorrectionPercentageOnLCD() {
 }
 
 void print6DigitsWatt(int aWattToPrint) {
-    sprintf_P(sStringBufferForLCDRow, PSTR("%6d W"), aWattToPrint); // force use of 6 columns
+    snprintf_P(sStringBufferForLCDRow, sizeof(sStringBufferForLCDRow), PSTR("%6d W"), aWattToPrint); // force use of 6 columns
     myLCD.print(sStringBufferForLCDRow);
 }
 
@@ -844,9 +906,16 @@ void printDataOnLCD() {
             print6DigitsWatt(sPowerForLCDAccumulator[0] / sNumberOfPowerSamplesForLCD);
             print6DigitsWatt(sPowerForLCDAccumulator[1] / sNumberOfPowerSamplesForLCD);
 
+#if defined(TRACE)
+            Serial.print(sPowerForLCDAccumulator[0]);
+            Serial.print('/');
+            Serial.println(sNumberOfPowerSamplesForLCD);
+#endif
+
             // Do not overwrite Reset by Watchdog indicator
             myLCD.setCursor(1, 1);
-            sprintf_P(sStringBufferForLCDRow, PSTR("%5d W"), sPowerForLCDAccumulator[2] / sNumberOfPowerSamplesForLCD); // force use of 5 columns
+            snprintf_P(sStringBufferForLCDRow, sizeof(sStringBufferForLCDRow), PSTR("%5d W"),
+                    sPowerForLCDAccumulator[2] / sNumberOfPowerSamplesForLCD); // force use of 5 columns
             myLCD.print(sStringBufferForLCDRow);
             if (sCounterForDisplayFreeze == 0) {
                 int16_t tPowerSum = (sPowerForLCDAccumulator[0] + sPowerForLCDAccumulator[1] + sPowerForLCDAccumulator[2])
@@ -865,18 +934,18 @@ void printDataOnLCD() {
         /*
          * ENERGY_ACCUMULATOR_1_WATT_HOUR is 45000 so we have only 16 bit resolution after division
          */
-        int16_t tEnergyL1 = sEnergyAccumulator[0] / ENERGY_ACCUMULATOR_1_WATT_HOUR;
-        int16_t tEnergyL2 = sEnergyAccumulator[1] / ENERGY_ACCUMULATOR_1_WATT_HOUR;
-        sprintf_P(sStringBufferForLCDRow, PSTR("%6dWh%6dWh"), tEnergyL1, tEnergyL2); // force use of 6 columns
+        int32_t tEnergyL1 = sEnergyAccumulator[0] / ENERGY_ACCUMULATOR_1_WATT_HOUR;
+        int32_t tEnergyL2 = sEnergyAccumulator[1] / ENERGY_ACCUMULATOR_1_WATT_HOUR;
+        snprintf_P(sStringBufferForLCDRow, sizeof(sStringBufferForLCDRow), PSTR("%6ldWh%6ldWh"), tEnergyL1, tEnergyL2); // force use of 6 columns
         myLCD.print(sStringBufferForLCDRow);
 
         // Second line. L3 and Sum energy
-        int16_t tEnergyL3 = sEnergyAccumulator[2] / ENERGY_ACCUMULATOR_1_WATT_HOUR;
+        int32_t tEnergyL3 = sEnergyAccumulator[2] / ENERGY_ACCUMULATOR_1_WATT_HOUR;
         if (sCounterForDisplayFreeze == 0) {
-            int16_t tEnergySum = tEnergyL1 + tEnergyL2 + tEnergyL3;
-            sprintf_P(sStringBufferForLCDRow, PSTR("%6dWh%6dWh"), tEnergyL3, tEnergySum); // force use of 6 columns
+            int32_t tEnergySum = tEnergyL1 + tEnergyL2 + tEnergyL3;
+            snprintf_P(sStringBufferForLCDRow, sizeof(sStringBufferForLCDRow), PSTR("%6ldWh%6ldWh"), tEnergyL3, tEnergySum); // force use of 6 columns
         } else {
-            sprintf_P(sStringBufferForLCDRow, PSTR("%5dWh "), tEnergyL3); // left 8 character for message
+            snprintf_P(sStringBufferForLCDRow, sizeof(sStringBufferForLCDRow), PSTR("%5ldWh "), tEnergyL3); // left 8 character for message
         }
         myLCD.setCursor(0, 1);
         myLCD.print(sStringBufferForLCDRow);
@@ -888,8 +957,9 @@ void printDataOnLCD() {
         if (sLCDInfoPageCounter == 0) {
             sLCDInfoPageCounter = 60;
             uint32_t tEnergyMinutes = sNumberOfEnergySamplesForLCD / LOOPS_PER_MINUTE;
-            sprintf_P(sStringBufferForLCDRow, PSTR("Time %4uD%02uH%02uM"), (uint16_t) (tEnergyMinutes / (60 * 24)),
-                    (uint16_t) ((tEnergyMinutes / 60) % 24), (uint16_t) tEnergyMinutes % 60);
+            snprintf_P(sStringBufferForLCDRow, sizeof(sStringBufferForLCDRow), PSTR("Time %4uD%02uH%02uM"),
+                    (uint16_t) (tEnergyMinutes / (60 * 24)), (uint16_t) ((tEnergyMinutes / 60) % 24),
+                    (uint16_t) tEnergyMinutes % 60);
             myLCD.print(sStringBufferForLCDRow);
 
             printCorrectionPercentageOnLCD();
@@ -911,13 +981,16 @@ void printDataOnLCD() {
 /*
  * 1.1 V at 30 A gives a resolution of 30 mA => 7 W @ 230 V
  * It seems, that the receive interrupt does not disturb the timing :-)
- * @return sum of 384 times (current * voltage) from sVoltageArray
+ * @return sum of 384 times (current * voltage) from sVoltageArray maximum is 401.867136 (1/2 Giga)
  */
 uint32_t readCurrentRaw(bool aStoreInArray) {
 //    digitalWriteFast(TIMING_DEBUG_OUTPUT_PIN, HIGH);
 // ADSC-StartConversion ADATE-AutoTriggerEnable ADIF-Reset Interrupt Flag
     ADCSRA = ((1 << ADEN) | (1 << ADSC) | (1 << ADATE) | (1 << ADIF) | ADC_PRESCALE32);
-    uint32_t tPower = 0; // Theoretical maximum value is NUMBER_OF_SAMPLES_FOR_10_MILLIS * 1023 * 1023 = < 2^29 with sine voltage < 2^28
+    /*
+     * Theoretical maximum value is NUMBER_OF_SAMPLES_FOR_10_MILLIS * 1023 * 1023 = 384 * 1046529 = 401.867136
+     */
+    uint32_t tPower = 0; //
     /*
      * Now read 384 samples. Each loop lasts 26 us.
      */
@@ -934,14 +1007,21 @@ uint32_t readCurrentRaw(bool aStoreInArray) {
         tPower += (uint32_t) tValue * sVoltageArray[i];
         // 3 us after loop_until_bit_is_set() until here, if aStoreInArray is false
 //        digitalWriteFast(TIMING_DEBUG_OUTPUT_PIN, HIGH);
-//        if (i % 16 == 0) {
+//#if defined(TRACE)
+//        if (i % 64 == 0) {
 //            Serial.print(F("i="));
-//            Serial.print(i);            Serial.print(F(" P="));
+//            Serial.print(i);
+//            Serial.print(F(" "));
+//            Serial.print(tValue);
+//            Serial.print(F("*"));
+//            Serial.print(sVoltageArray[i]);
+//            Serial.print(F("="));
 //            Serial.print(tPower);
-//            Serial.print(F(" 0x"));
+//            Serial.print(F("|0x"));
 //            Serial.print(tPower, HEX);
 //            Serial.println();
 //        }
+//#endif
     }
     ADCSRA = ((1 << ADEN) | (1 << ADIF) | ADC_PRESCALE32); // Disable auto-triggering (free running mode), but the last conversion is still running
 //    digitalWriteFast(TIMING_DEBUG_OUTPUT_PIN, LOW);

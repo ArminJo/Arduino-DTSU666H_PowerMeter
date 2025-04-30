@@ -95,7 +95,7 @@ uint16_t calculateCrc(uint8_t *aBuffer, uint16_t aBufferLength);
 #include "LiquidCrystal_I2C.hpp" // This defines USE_SOFT_I2C_MASTER, if SoftI2CMasterConfig.h is available. Use the modified version delivered with this program!
 LiquidCrystal_I2C myLCD(LCD_I2C_ADDRESS, LCD_COLUMNS, LCD_ROWS);
 bool sSerialLCDAvailable;
-char sStringBufferForLCDRow[LCD_COLUMNS + 1]; // For rendering LCD lines with sprintf()
+char sStringBufferForLCDRow[LCD_COLUMNS + 1]; // For rendering LCD lines with snprintf_P()
 
 // Helper macro for getting a macro definition as string
 #define STR_HELPER(x) #x
@@ -110,7 +110,6 @@ void setup() {
     pinMode(DIRECT_PIN, INPUT_PULLUP);
 
     Serial.begin(115200);
-
 #if defined(__AVR_ATmega32U4__) || defined(SERIAL_PORT_USBVIRTUAL) || defined(SERIAL_USB) /*stm32duino*/|| defined(USBCON) /*STM32_stm32*/ \
     || defined(SERIALUSB_PID)  || defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_attiny3217)
     delay(4000); // To be able to connect Serial monitor after reset or power up and before first print out. Do not wait for an attached Serial Monitor!
@@ -354,14 +353,14 @@ void printPowerToLCD(int16_t &aPowerLowpass5, int16_t aPower) {
     if (!sPrintNonFilteredValues) {
         if (abs(aPowerLowpass5 - aPower) > abs(aPowerLowpass5 / 4)) {
             aPowerLowpass5 = aPower; // Fast response, reinitialize lowpass.
-            sprintf_P(sStringBufferForLCDRow, PSTR("%6d W"), aPowerLowpass5); // force use of 6 columns
+            snprintf_P(sStringBufferForLCDRow, sizeof(sStringBufferForLCDRow), PSTR("%6d W"), aPowerLowpass5); // force use of 6 columns
         } else {
             aPowerLowpass5 += ((aPower - aPowerLowpass5) + (1 << 4)) >> 5; // 2.5 us, alpha = 1/32 0.03125, cutoff frequency 5.13 Hz @1kHz
-            sprintf_P(sStringBufferForLCDRow, PSTR("%6d_W"), aPowerLowpass5); // force use of 6 columns
+            snprintf_P(sStringBufferForLCDRow, sizeof(sStringBufferForLCDRow), PSTR("%6d_W"), aPowerLowpass5); // force use of 6 columns
         }
     } else {
         aPowerLowpass5 = aPower; // Required for sum.
-        sprintf_P(sStringBufferForLCDRow, PSTR("%6d W"), aPower); // force use of 6 columns
+        snprintf_P(sStringBufferForLCDRow, sizeof(sStringBufferForLCDRow), PSTR("%6d W"), aPower); // force use of 6 columns
     }
     /*
      * 11 ms. 6 ms with delayMicroseconds(40); and 3.4 ms with delayMicroseconds(2) instead of delayMicroseconds(100);
