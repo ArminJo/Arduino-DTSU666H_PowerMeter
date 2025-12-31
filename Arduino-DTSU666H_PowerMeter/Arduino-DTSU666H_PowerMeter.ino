@@ -31,8 +31,8 @@
 // https://www.ni.com/en/shop/seamlessly-connect-to-third-party-devices-and-supervisory-system/the-modbus-protocol-in-depth.html
 // https://ipc2u.de/artikel/wissenswertes/modbus-rtu-einfach-gemacht-mit-detaillierten-beschreibungen-und-beispielen/
 /*
- * We assume, that voltage waveform of the 3 phases are equal and negative and positive values are symmetric
- * so we take only one half wave as voltage reference.
+ * We assume, that the voltage waveforms of the 3 phases are equal and that the positive and negative voltage and current values are symmetrical.
+ * Therefore, we can take the positive half wave as the voltage reference, for example.
  *
  * Definitions: Phase A (L1) is the reference (the one, that supplies the voltage and which can be negative),
  *   phase B has a delay of 6.6 ms / 120 degrees and C has a delay of 13.3 ms / 240 degrees.
@@ -41,17 +41,17 @@
  * 1. Read "positive" part voltage values of phase A for 10 ms and store 385 values in RAM to be used as reference for all 3 phases.
  *    This starts 16 Bit timer 1 to keep track of the phase for the next current measurements.
  * 2. Wait 3.3 ms.
- * 3. After 10 + 3.333 ms do 10 ms phase C current measurement. Multiply values with voltage.
+ * 3. After 10 + 3.333 ms do 10 ms phase C positive current measurement. Multiply values with voltage.
  * 4. Wait 3.3 ms.
- * 5. After 20 + 6.666 ms do 10 ms phase B current measurement. Multiply values with voltage.
+ * 5. After 20 + 6.666 ms do 10 ms phase B positive current measurement. Multiply values with voltage.
  * 6. Wait 3.3 ms
- * 7. After 40 ms do 20 ms phase A current measurement, which will also cover negative current (which gives positive values at the last 10 ms). Multiply values with voltage.
+ * 7. After 40 ms do 20 ms phase A current measurement, which will also cover negative current, which give positive values at the last 10 ms. Multiply values with voltage.
  * 8. 20 ms for math and reply to RS485 or output to LCD until starting again at 80 ms - x ms.
  *
  * In short notation:
  * 0 ms: U phase A | 13.3 ms: I phase C | 26.6 ms: I phase B | 40 ms: I phase A | 50 ms: -I phase A | 60 ms: sending etc. | 80 ms: start again
  *
- * Alternative timing for covering negative values of all 3 phases:
+ * Alternative timing for covering negative values of all 3 phases (not yet implemented):
  * 0 ms: U phase A | 13.3 ms: +/-I phase C | 40 ms: +/-I phase A | 66.6 ms: +/-I phase B | 86.6 ms sending etc. | 100 ms: start again
  *
  * The Deye inverter sends a 9600 baud modbus request 01 03  15 1E  00 06  A1 C2 every 100 ms to 120 ms.
@@ -103,7 +103,7 @@
 #define LINE_WITH_13_MS_DELAY           3 // (C) The internal index / channel of the power line, which is 13.3 ms delayed to the line, which can be negative
 #endif
 
-//#define TIMING_DEBUG  Output Timing waveform at pin A5
+//#define TIMING_DEBUG    // Output Timing waveform at pin A5
 
 /*
  * Modbus stuff
@@ -134,7 +134,7 @@ struct ModbusRTUMinimalReplyStruct {
     uint16_t SwappedFirstRegisterContent; // high byte was sent first
     uint16_t CRC; // CRC-16-MODBUS x^16 + x^15 + x^2 + 1
 };
-#define MODBUS_REPLY_ONE_WORD_LENGTH    (sizeof(ModbusRTUMinimalReplyStruct))
+#define MODBUS_REPLY_ONE_WORD_LENGTH    (sizeof(ModbusRTUMinimalReplyStruct)) // 7
 
 struct ModbusRTU3FloatReplyStruct {
     uint8_t SlaveAddress;
@@ -245,10 +245,10 @@ int32_t sPowerForModbusAccumulator[3];  // Index 0 is for L1, 1 is for L2 at ADC
 /*
  * Use 64 bit value here, since the divisor for Wh is 45000 and we want to see more than 47 kWh at page ENERGY
  */
-int64_t sEnergyAccumulator[3];          // Contains sum of sNumberOfSamplesForEnergy entries of power
+int64_t sTotalEnergyAccumulator[3];          // Contains sum of sNumberOfSamplesForEnergy entries of power
 int32_t sEnergyAccumulatorSumForFlash;
-uint8_t sWattHourFlashCounter;
-uint32_t sNumberOfEnergySamplesForLCD;
+uint8_t sNumberOfPowerSamplesFor1WattHourFlash;
+uint32_t sNumberOfTotalEnergySamples;
 
 int16_t sPowerSum;
 
@@ -277,14 +277,14 @@ uint32_t sMillisOfLastSerialPlotterOutput;
  * Power correction
  */
 uint8_t sPowerCorrectionPercentage = 100;
-EEMEM uint8_t sPowerCorrectionPercentageEeprom;    // Storage in EEPROM for sTemperatureCorrectionFloat
+EEMEM uint8_t sPowerCorrectionPercentageEeprom;    // Storage in EEPROM for sPowerCorrectionPercentage
 uint8_t s80MillisecondsAutorepeatCounter = 0;
 #define POWER_CORRECTION_PERCENTAGE_CHANGE_VALUE      1 // One percent. The value to add or subtract to sPowerCorrectionFloat at each correction button press
 void checkPowerCorrectionPins();
 void printCorrectionPercentageOnLCD();
 
 void readVoltage(bool aDoFindZeroCrossing);
-uint32_t readCurrentRaw(bool aStoreInArray = false);
+uint32_t readCurrentAndComputeRawPower(bool aStoreInArray = false);
 void printPower();
 
 void checkAndPrintInputSignalValuesForArduinoPlotter();
@@ -530,7 +530,7 @@ void loop() {
     /**************************************************
      * Read current values and compute power of phase C
      **************************************************/
-    int32_t tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WITH_13_MS_DELAY); // at 3.396 ms. Maximum is 2^29 and fits in signed long
+    int32_t tPowerRaw = readCurrentAndComputeRawPower(tIndexOfCurrentToPrint == LINE_WITH_13_MS_DELAY); // at 3.396 ms. Maximum is 2^29 and fits in signed long
     TIMING_PIN_LOW();
     sWatchdogResetInfoCharacter = 'B'; // Hangup at current measurement code line B / 2
 
@@ -549,7 +549,7 @@ void loop() {
     TIFR1 = _BV(OCF1A);  // Clear all timer compare flags
     /*
      * Store values for phase C
-     * We have 3.3 ms for all the code between 2 readCurrentRaw()
+     * We have 3.3 ms for all the code between 2 readCurrentAndComputeRawPower()
      */
     int16_t tPower; // Theoretical maximum is 11977 i.e. 11.977 kW, practical maximum is 30 A *230 V = 6,9 kW
     if (sPowerCorrectionPercentage == 100) {
@@ -561,7 +561,7 @@ void loop() {
 
     sPowerForLCDAccumulator[LINE_WITH_13_MS_DELAY - 1] += tPower;
     sPowerForModbusAccumulator[LINE_WITH_13_MS_DELAY - 1] += tPower;
-    sEnergyAccumulator[LINE_WITH_13_MS_DELAY - 1] += tPower;
+    sTotalEnergyAccumulator[LINE_WITH_13_MS_DELAY - 1] += tPower;
     sEnergyAccumulatorSumForFlash += tPower;
 
     /*
@@ -574,7 +574,7 @@ void loop() {
     /**************************************************
      * Read current values and compute power of phase B
      **************************************************/
-    tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WITH_7_MS_DELAY);
+    tPowerRaw = readCurrentAndComputeRawPower(tIndexOfCurrentToPrint == LINE_WITH_7_MS_DELAY);
     TIMING_PIN_LOW();
     sWatchdogResetInfoCharacter = 'A'; // Hangup at positive current measurement code line A / 1
 
@@ -608,13 +608,13 @@ void loop() {
 
     sPowerForLCDAccumulator[LINE_WITH_7_MS_DELAY - 1] += tPower; // [0]
     sPowerForModbusAccumulator[LINE_WITH_7_MS_DELAY - 1] += tPower;
-    sEnergyAccumulator[LINE_WITH_7_MS_DELAY - 1] += tPower;
+    sTotalEnergyAccumulator[LINE_WITH_7_MS_DELAY - 1] += tPower;
     sEnergyAccumulatorSumForFlash += tPower;
 
     // Do it here and not after the last reading
     sNumberOfPowerSamplesForLCD++;
     sNumberOfPowerSamplesForModbus++;
-    sNumberOfEnergySamplesForLCD++;
+    sNumberOfTotalEnergySamples++;
     if (sCounterForDisplayFreeze > 0) {
         sCounterForDisplayFreeze--;
     }
@@ -636,7 +636,7 @@ void loop() {
 #if defined(STANDALONE_TEST)
     tPowerRaw = 0; // Force negative values for this phase
 #else
-    tPowerRaw = readCurrentRaw(tIndexOfCurrentToPrint == LINE_WHICH_CAN_BE_NEGATIVE); // gives 0 for negative power
+    tPowerRaw = readCurrentAndComputeRawPower(tIndexOfCurrentToPrint == LINE_WHICH_CAN_BE_NEGATIVE); // gives 0 for negative power
 #endif
 
     sWatchdogResetInfoCharacter = '-'; // Hangup at negative current measurement code line A / 1
@@ -644,7 +644,7 @@ void loop() {
      * Read the half wave phase A with negative voltage.
      * If we sell power, we have positive current here.
      ***************************************************/
-    tPowerRaw -= readCurrentRaw(tIndexOfCurrentToPrint == INDEX_OF_NEGATIVE_CURRENT); // negative half wave of reference phase A is stored in index 0
+    tPowerRaw -= readCurrentAndComputeRawPower(tIndexOfCurrentToPrint == INDEX_OF_NEGATIVE_CURRENT); // negative half wave of reference phase A is stored in index 0
     TIMING_PIN_LOW();
     sWatchdogResetInfoCharacter = 'L'; // Hangup at loop() code
 
@@ -678,15 +678,15 @@ void loop() {
 
     sPowerForLCDAccumulator[LINE_WHICH_CAN_BE_NEGATIVE - 1] += tPower; // -1 for array index
     sPowerForModbusAccumulator[LINE_WHICH_CAN_BE_NEGATIVE - 1] += tPower;
-    sEnergyAccumulator[LINE_WHICH_CAN_BE_NEGATIVE - 1] += tPower;
+    sTotalEnergyAccumulator[LINE_WHICH_CAN_BE_NEGATIVE - 1] += tPower;
     sEnergyAccumulatorSumForFlash += tPower;
 
     /*
      * Check for 2. flash, indicating negative energy
      */
-    if (sWattHourFlashCounter > 0) {
-        sWattHourFlashCounter--;
-        if (sWattHourFlashCounter > 0) {
+    if (sNumberOfPowerSamplesFor1WattHourFlash > 0) {
+        sNumberOfPowerSamplesFor1WattHourFlash--;
+        if (sNumberOfPowerSamplesFor1WattHourFlash > 0) {
             digitalWriteFast(LED_BUILTIN, HIGH); // Flash again for 30 ms, i.e. until voltage reading of next loop
         }
     }
@@ -699,7 +699,7 @@ void loop() {
         digitalWriteFast(LED_BUILTIN, HIGH); // One 30 ms flash, i.e. until voltage reading of next loop
     } else if (sEnergyAccumulatorSumForFlash < -ENERGY_ACCUMULATOR_1_WATT_HOUR) {
         sEnergyAccumulatorSumForFlash += ENERGY_ACCUMULATOR_1_WATT_HOUR;
-        sWattHourFlashCounter = 2; // 2 30 ms flashes on negative energy
+        sNumberOfPowerSamplesFor1WattHourFlash = 2; // 2 30 ms flashes on negative energy
         digitalWriteFast(LED_BUILTIN, HIGH);
     }
 
@@ -745,10 +745,10 @@ void loop() {
          * Because page was switched to POWER_METER_PAGE_INFO by press we must set page back to energy here.
          */
         sLCDDisplayPage = POWER_METER_PAGE_ENERGY;
-        sNumberOfEnergySamplesForLCD = 0;
-        sEnergyAccumulator[0] = 0;
-        sEnergyAccumulator[1] = 0;
-        sEnergyAccumulator[2] = 0;
+        sNumberOfTotalEnergySamples = 0;
+        sTotalEnergyAccumulator[0] = 0;
+        sTotalEnergyAccumulator[1] = 0;
+        sTotalEnergyAccumulator[2] = 0;
     }
 
 //    delay(10000); // to test watchdog
@@ -934,13 +934,13 @@ void printDataOnLCD() {
         /*
          * ENERGY_ACCUMULATOR_1_WATT_HOUR is 45000 so we have only 16 bit resolution after division
          */
-        int32_t tEnergyL1 = sEnergyAccumulator[0] / ENERGY_ACCUMULATOR_1_WATT_HOUR;
-        int32_t tEnergyL2 = sEnergyAccumulator[1] / ENERGY_ACCUMULATOR_1_WATT_HOUR;
+        int32_t tEnergyL1 = sTotalEnergyAccumulator[0] / ENERGY_ACCUMULATOR_1_WATT_HOUR;
+        int32_t tEnergyL2 = sTotalEnergyAccumulator[1] / ENERGY_ACCUMULATOR_1_WATT_HOUR;
         snprintf_P(sStringBufferForLCDRow, sizeof(sStringBufferForLCDRow), PSTR("%6ldWh%6ldWh"), tEnergyL1, tEnergyL2); // force use of 6 columns
         myLCD.print(sStringBufferForLCDRow);
 
         // Second line. L3 and Sum energy
-        int32_t tEnergyL3 = sEnergyAccumulator[2] / ENERGY_ACCUMULATOR_1_WATT_HOUR;
+        int32_t tEnergyL3 = sTotalEnergyAccumulator[2] / ENERGY_ACCUMULATOR_1_WATT_HOUR;
         if (sCounterForDisplayFreeze == 0) {
             int32_t tEnergySum = tEnergyL1 + tEnergyL2 + tEnergyL3;
             snprintf_P(sStringBufferForLCDRow, sizeof(sStringBufferForLCDRow), PSTR("%6ldWh%6ldWh"), tEnergyL3, tEnergySum); // force use of 6 columns
@@ -956,7 +956,7 @@ void printDataOnLCD() {
          */
         if (sLCDInfoPageCounter == 0) {
             sLCDInfoPageCounter = 60;
-            uint32_t tEnergyMinutes = sNumberOfEnergySamplesForLCD / LOOPS_PER_MINUTE;
+            uint32_t tEnergyMinutes = sNumberOfTotalEnergySamples / LOOPS_PER_MINUTE;
             snprintf_P(sStringBufferForLCDRow, sizeof(sStringBufferForLCDRow), PSTR("Time %4uD%02uH%02uM"),
                     (uint16_t) (tEnergyMinutes / (60 * 24)), (uint16_t) ((tEnergyMinutes / 60) % 24),
                     (uint16_t) tEnergyMinutes % 60);
@@ -983,7 +983,7 @@ void printDataOnLCD() {
  * It seems, that the receive interrupt does not disturb the timing :-)
  * @return sum of 384 times (current * voltage) from sVoltageArray maximum is 401.867136 (1/2 Giga)
  */
-uint32_t readCurrentRaw(bool aStoreInArray) {
+uint32_t readCurrentAndComputeRawPower(bool aStoreInArray) {
 //    digitalWriteFast(TIMING_DEBUG_OUTPUT_PIN, HIGH);
 // ADSC-StartConversion ADATE-AutoTriggerEnable ADIF-Reset Interrupt Flag
     ADCSRA = ((1 << ADEN) | (1 << ADSC) | (1 << ADATE) | (1 << ADIF) | ADC_PRESCALE32);

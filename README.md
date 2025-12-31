@@ -114,8 +114,10 @@ Also usable as connection schematic.
 <br/>
 
 
+# Schematics of signal conditioning
+
 ```
- Implemented with 3 x 30A split-core current transformers.
+ Implemented with 3 x 30A split-core current transformers:
  2. order low pass 1600 Hz, to suppressthe high frequency modulation of current as seen above.
                ____         ____         _____
           o---|____|---o---|____|---o---|_____|---o-----> A1 (A2, A3)
@@ -137,7 +139,7 @@ HIGH VOLTAGE - DANGER - use heat-shrink tubing
               1M       1M       1M      630 k    |     |
                                                  _     |
                                                 | |    | Schottky diode
-                                                | |    o-|<|-o
+                                           10 k | |    o-|<|-o
                                                 |_|          |
                                                  |           |
                                                __|___________|__ N (GND)
