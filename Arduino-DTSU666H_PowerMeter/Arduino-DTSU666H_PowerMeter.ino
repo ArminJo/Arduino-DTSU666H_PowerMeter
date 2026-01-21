@@ -9,7 +9,7 @@
  *  but runs not totally correct due to bug https://github.com/wokwi/avr8js/issues/136
  *
  *
- *  Copyright (C) 2023-2025  Armin Joachimsmeyer
+ *  Copyright (C) 2023-2026  Armin Joachimsmeyer
  *  Email: armin.joachimsmeyer@gmail.com
  *
  *  This file is part of Arduino-DTSU666H_PowerMeter https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter.
@@ -38,6 +38,7 @@
  *   phase B has a delay of 6.6 ms / 120 degrees and C has a delay of 13.3 ms / 240 degrees.
  *
  * Program flow:
+ * 0. Wait for voltage zero crossing.
  * 1. Read "positive" part voltage values of phase A for 10 ms and store 385 values in RAM to be used as reference for all 3 phases.
  *    This starts 16 Bit timer 1 to keep track of the phase for the next current measurements.
  * 2. Wait 3.3 ms.
@@ -61,7 +62,7 @@
  */
 
 /*
- * Every watt-hour, the build-in LED flashes for 30 ms.
+ * Every watt-hour, the build-in LED flashes for 30 ms. This is e.g. a flash each 36 seconds at 100 W.
  * During ever loop the LED flashes for a few microseconds as "alive" signal.
  *
  * There are 4 LCD pages
@@ -206,7 +207,7 @@ LiquidCrystal myLCD(11, 12, 7, 8, 9, 10); // Pins 7 to 12
 #define LCD_COLUMNS                             20
 #define LCD_ROWS                                4
 #define MILLISECONDS_BETWEEN_LCD_OUTPUT         (8 * DURATION_OF_ONE_LOOP_MILLIS) // 640
-void printDataOnLCD();                  // Called every MILLISECONDS_BETWEEN_LCD_OUTPUT
+void LCD_checkAndPrintData();                  // Called every MILLISECONDS_BETWEEN_LCD_OUTPUT
 
 uint32_t sMillisOfLastLCDOutput;
 char sStringBufferForLCDRow[17];        // For rendering LCD lines with snprintf_P()
@@ -270,7 +271,7 @@ uint32_t sMillisOfLastSerialPlotterOutput;
  * We sum 384 samples per measurement so here we have LSB of 12 mW / 384 = 0.0298 mW
  * 1 / 0.0298 = 33554
  */
-#define POWER_SCALE_DIVISOR         33554
+#define POWER_SCALE_DIVISOR         33554 // We have 1 Watt, if we have 33554 as result of readCurrentAndComputeRawPower()
 //#define POWER_SCALE_DIVISOR         32768 // We take a power of 2 instead of NUMBER_OF_SAMPLES_FOR_10_MILLIS / 0.00114 watt, because it is faster and only + 2.4%
 #define ENERGY_ACCUMULATOR_1_WATT_HOUR      ((3600L * 1000L) / DURATION_OF_ONE_LOOP_MILLIS) // 45000. 3600 seconds in a hour and 1000 ms / 80 ms samples per second
 /*
@@ -278,7 +279,7 @@ uint32_t sMillisOfLastSerialPlotterOutput;
  */
 uint8_t sPowerCorrectionPercentage = 100;
 EEMEM uint8_t sPowerCorrectionPercentageEeprom;    // Storage in EEPROM for sPowerCorrectionPercentage
-uint8_t s80MillisecondsAutorepeatCounter = 0;
+bool sPowerCorrectionButtonIsActive;
 #define POWER_CORRECTION_PERCENTAGE_CHANGE_VALUE      1 // One percent. The value to add or subtract to sPowerCorrectionFloat at each correction button press
 void checkPowerCorrectionPins();
 void printCorrectionPercentageOnLCD();
@@ -711,7 +712,7 @@ void loop() {
 
     /*
      * Handle periodical print request.
-     * Must be before printDataOnLCD(), because this resets the power value
+     * Must be before LCD_checkAndPrintData(), because this resets the power value
      */
     if (tPeriodicallyPrintIsEnabled) {
         checkAndPrintInputSignalValuesForArduinoPlotter();
@@ -732,7 +733,7 @@ void loop() {
 
                 sPageButtonJustPressed = false;
                 sMillisOfLastLCDOutput = millis(); // set for next check
-                printDataOnLCD(); // 3.4 ms
+                LCD_checkAndPrintData(); // 3.4 ms
             }
         }
     }
@@ -764,9 +765,10 @@ void checkPowerCorrectionPins() {
     bool tMinusActivated = !digitalReadFast(POWER_CORRECTION_MINUS_PIN);
     bool tPlusActivated = !digitalReadFast(POWER_CORRECTION_PLUS_PIN);
     if (tMinusActivated || tPlusActivated) {
-        if (s80MillisecondsAutorepeatCounter == 0 || s80MillisecondsAutorepeatCounter > 24) {
+        if (!sPowerCorrectionButtonIsActive) {
+            sPowerCorrectionButtonIsActive = true;
             /*
-             * here one button just gets active or long press for more than 1 second -> change value
+             * here one button just gets active -> change value
              */
 #if !defined(STANDALONE_TEST)
             Serial.begin(115200); // this disables output in Wokwi
@@ -780,11 +782,10 @@ void checkPowerCorrectionPins() {
                 Serial.print(F("In"));
             }
             Serial.print(F("crement power correction to "));
-            Serial.println(sPowerCorrectionPercentage, 2);
+            Serial.println(sPowerCorrectionPercentage);
             // Write value to EEPROM
             eeprom_write_byte(&sPowerCorrectionPercentageEeprom, sPowerCorrectionPercentage);
 
-            s80MillisecondsAutorepeatCounter = 12; // If long press, then next change in 1000 ms
 
             /*
              * Force display of power page
@@ -803,13 +804,12 @@ void checkPowerCorrectionPins() {
 #endif
             sCounterForDisplayFreeze = LOOPS_OF_CORRECTION_MESSAGE_DISPLAY_FREEZE; // 3 seconds
         }
-        s80MillisecondsAutorepeatCounter++;
 
     } else {
         /*
          * No button pressed here
          */
-        s80MillisecondsAutorepeatCounter = 0;
+        sPowerCorrectionButtonIsActive = false;
     }
 }
 
@@ -898,7 +898,7 @@ void print6DigitsWatt(int aWattToPrint) {
  * 11 ms. 6 ms with delayMicroseconds(40); and 3.4 ms with delayMicroseconds(2) instead of delayMicroseconds(100);   // commands need > 37us to settle
  * Called every MILLISECONDS_BETWEEN_LCD_OUTPUT (320 ms)
  */
-void printDataOnLCD() {
+void LCD_checkAndPrintData() {
     myLCD.setCursor(0, 0);
 
     if (sLCDDisplayPage == POWER_METER_PAGE_POWER) {
