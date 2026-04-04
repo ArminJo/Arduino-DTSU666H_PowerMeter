@@ -1,7 +1,7 @@
 # TestCompile.yml
 # Github workflow script to test compile all examples of an Arduino library repository.
 #
-# Copyright (C) 2023-2025  Armin Joachimsmeyer
+# Copyright (C) 2023-2026  Armin Joachimsmeyer
 # https://github.com/ArminJo/Github-Actions
 #
 
@@ -29,18 +29,36 @@ jobs:
         arduino-boards-fqbn:
           - arduino:avr:uno
           - arduino:avr:uno|TIMING_DEBUG
+          - arduino:avr:uno|PowerMeter
 
         include:
+          - arduino-boards-fqbn: arduino:avr:uno
+            sketches-exclude: PowerMeter
+
           - arduino-boards-fqbn: arduino:avr:uno|TIMING_DEBUG
+            sketches-exclude: PowerMeter
             build-properties:
               All: -DTIMING_DEBUG
+
+          - arduino-boards-fqbn: arduino:avr:uno|PowerMeter
+            required-libraries: digitalWriteFast,LiquidCrystal,LCDBigNumbers,BlueDisplay
+
 
     steps:
       - name: Checkout
         uses: actions/checkout@master
 
+      - name: Checkout master version of Arduino-Utils
+        uses: actions/checkout@master
+        with:
+          repository: ArminJo/Arduino-Utils
+          ref: master
+          path: CustomLibrary_Arduino-Utils # must contain string "Custom" results in /home/runner/Arduino/libraries/CustomLibrary
+          # No need to put this custom library in the required-libraries list
+
       - name: Compile all examples
         uses: ArminJo/arduino-test-compile@master
         with:
-#          required-libraries: EasyButtonAtInt01,SoftI2CMaster
+          required-libraries: '${{ matrix.required-libraries }}'
           build-properties: ${{ toJson(matrix.build-properties) }}
+          sketches-exclude: ${{ matrix.sketches-exclude }}

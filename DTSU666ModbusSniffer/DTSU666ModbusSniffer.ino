@@ -98,8 +98,10 @@ bool sSerialLCDAvailable;
 char sStringBufferForLCDRow[LCD_COLUMNS + 1]; // For rendering LCD lines with snprintf_P()
 
 // Helper macro for getting a macro definition as string
+#if !defined(STR_HELPER) && !defined(STR)
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
+#endif
 
 void setup() {
 // initialize the digital pin as an output.
@@ -345,20 +347,21 @@ void printDataToSerialAndLCD() {
  * Apply EMA lowpass alpha = 0.03125 | 1/32 to the power values.
  * Cutoff frequency is 0.051 Hz @10Hz.
  * https://github.com/ArminJo/Arduino-Utils?tab=readme-ov-file#simpleemafilters
- * Skip lowpass if delta is more than 12 % (guessed value),
- * otherwise we see a slow increasing value at a power jump, caused by switching a load.
+ * Skip lowpass if delta is more than 25 % (/4) or 12 % (/8), to avoid to have a slow increasing value at a fast power jump.
  * The character '_' indicates a filtered value
  */
 void printPowerToLCD(int16_t &aPowerLowpass5, int16_t aPower) {
     if (!sPrintNonFilteredValues) {
         if (abs(aPowerLowpass5 - aPower) > abs(aPowerLowpass5 / 4)) {
+            // /4 corresponding to %25 percent is a reasonable heuristic value
             aPowerLowpass5 = aPower; // Fast response, reinitialize lowpass.
             snprintf_P(sStringBufferForLCDRow, sizeof(sStringBufferForLCDRow), PSTR("%6d W"), aPowerLowpass5); // force use of 6 columns
         } else {
             aPowerLowpass5 += ((aPower - aPowerLowpass5) + (1 << 4)) >> 5; // 2.5 us, alpha = 1/32 0.03125, cutoff frequency 5.13 Hz @1kHz
-            snprintf_P(sStringBufferForLCDRow, sizeof(sStringBufferForLCDRow), PSTR("%6d_W"), aPowerLowpass5); // force use of 6 columns
+            snprintf_P(sStringBufferForLCDRow, sizeof(sStringBufferForLCDRow), PSTR("%6d_W"), aPowerLowpass5); // Print '_', force use of 6 columns
         }
     } else {
+        // Non filtered value here
         aPowerLowpass5 = aPower; // Required for sum.
         snprintf_P(sStringBufferForLCDRow, sizeof(sStringBufferForLCDRow), PSTR("%6d W"), aPower); // force use of 6 columns
     }

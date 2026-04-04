@@ -4,6 +4,7 @@
  *  Substitutes the RS485 modbus service of DTSU-H 3 phase power meter for a Deye hybrid inverter.
  *  At address 0x15 1E Deye asks for 3 float power values in kW units.
  *  Measuring is done with an Arduino Nano and 3 30A CT's.
+ *  The modbus 9600 Bd request is received at RX, the reply is sent at pin 2 using software serial.
  *
  *  This program is available on Wokwi https://wokwi.com/projects/399302567914368001,
  *  but runs not totally correct due to bug https://github.com/wokwi/avr8js/issues/136
@@ -58,7 +59,7 @@
  * The Deye inverter sends a 9600 baud modbus request 01 03  15 1E  00 06  A1 C2 every 100 ms to 120 ms.
  * We send the reply at pin 2 with software serial at a 80 ms raster.
  * This means, around every 400 ms we have one loop where we do not need to reply and can update the LCD instead.
- * Sometimes the Deye sends the request, while we do a reply.
+ * If the Deye sends the request, while we do a reply, then the next reply is sent after 80 ms.
  */
 
 /*
@@ -78,7 +79,7 @@
 
 #include "MillisUtils.h"    // For enableMillisInterrupt(), disableMillisInterrupt()
 #include "ADCUtils.h"       // For ADC_PRESCALE32 and SHIFT_VALUE_FOR_REFERENCE
-#include "AVRUtils.h"       // For initStackFreeMeasurement(), printRAMInfo()
+#include "AVRUtils.h"       // For initStackFreeMeasurement(), printRAMAndStackInfo()
 #include "digitalWriteFast.h"
 #include "LongUnion.h"
 #include "LiquidCrystal.h"
@@ -324,8 +325,10 @@ uint8_t sMCUSRStored; // content of MCUSR register at startup
 char sWatchdogResetInfoCharacter __attribute__ ((section(".noinit")));
 
 // Helper macro for getting a macro definition as string
+#if !defined(STR_HELPER) && !defined(STR)
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
+#endif
 
 void setup() {
     sMCUSRStored = MCUSR; // content of MCUSR register at startup
@@ -446,7 +449,7 @@ void setup() {
     delay(500); // To show "Power meter " VERSION_EXAMPLE for 2 seconds
 
     Serial.println();
-    printRAMInfo(&Serial); // Stack used is 126 bytes
+    printRAMAndStackInfo(&Serial); // Stack used is 126 bytes
 
     myLCD.setCursor(0, 1);
     myLCD.print(F("Wait for U at L" STR(LINE_WHICH_CAN_BE_NEGATIVE)));
@@ -491,11 +494,11 @@ void loop() {
 
     TIMING_PIN_HIGH();
     sWatchdogResetInfoCharacter = 'V'; // indicator for hangup at voltage zero crossing detection
-//    disableMillisInterrupt(); // Required if called readVoltage(false);. Disable Timer0 (millis()) overflow interrupt.
     /*
      * Read voltage of phase A
      */
 #if defined(STANDALONE_TEST)
+    disableMillisInterrupt(); // Required if called readVoltage(false);. Disable Timer0 (millis()) overflow interrupt.
     readVoltage(false); // Do not wait for zero crossing of voltage
 #else
     readVoltage(true);
@@ -550,7 +553,7 @@ void loop() {
     TIFR1 = _BV(OCF1A);  // Clear all timer compare flags
     /*
      * Store values for phase C
-     * We have 3.3 ms for all the code between 2 readCurrentAndComputeRawPower()
+     * We have 3.3 ms for all the code between here and the next call of readCurrentAndComputeRawPower()
      */
     int16_t tPower; // Theoretical maximum is 11977 i.e. 11.977 kW, practical maximum is 30 A *230 V = 6,9 kW
     if (sPowerCorrectionPercentage == 100) {
@@ -650,7 +653,7 @@ void loop() {
     sWatchdogResetInfoCharacter = 'L'; // Hangup at loop() code
 
     /*
-     * fast actions
+     * Fast actions after reading all 3 phases
      */
 #if defined(STANDALONE_TEST)
     ADMUX = ADC_CHANNEL_FOR_VOLTAGE | (DEFAULT << SHIFT_VALUE_FOR_REFERENCE); // Leave reference at 5 V
@@ -706,7 +709,7 @@ void loop() {
 
     /*
      * Here we have a new set of values.
-     * Start computing, communication LCD output and optional Serial Plotter output.
+     * Start handling optional Serial Plotter output, LCD output and optional Serial Plotter output.
      * This may last up to 20 ms, since after 20 ms the L1 voltage starts again with the positive half wave.
      */
 
@@ -720,14 +723,14 @@ void loop() {
     }
 
     /*
-     * Check if we have a modbus request
+     * Check if we have a modbus request and sent a reply or button was pressed
      * Enable fast response to button press
      */
     if (!checkAndReplyToModbusRequest() || sPageButtonJustPressed) {
         if (!(PageButtonAtPin3.readDebouncedButtonState() && sLCDDisplayPage == POWER_METER_PAGE_INFO)) {
             /*
-             * Here no long press at page Energy!
-             * If no reply was sent -which took 18 ms-, we have time to print on LCD which takes 3.4 ms
+             * Here no reply was sent and no long press at page Energy!
+             * Now we have time to print on LCD which takes 3.4 ms
              */
             if (sPageButtonJustPressed || millis() - sMillisOfLastLCDOutput >= MILLISECONDS_BETWEEN_LCD_OUTPUT) {
 
@@ -785,7 +788,6 @@ void checkPowerCorrectionPins() {
             Serial.println(sPowerCorrectionPercentage);
             // Write value to EEPROM
             eeprom_write_byte(&sPowerCorrectionPercentageEeprom, sPowerCorrectionPercentage);
-
 
             /*
              * Force display of power page
@@ -1235,8 +1237,9 @@ bool checkAndReplyToModbusRequest() {
         Serial.readBytes(sModbusRTURequestUnion.ReceiveByteBuffer, MODBUS_REQUEST_LENGTH);
         if (tNumberOfAvaliableBytes > MODBUS_REQUEST_LENGTH) {
             /*
-             * Too many bytes available. Incorrect request, maybe because the Deye sent a request, while we were responding the last time.
-             * Clear additional bytes from receive buffer
+             * Too many bytes available. Incorrect request, maybe because the Deye sent a request,
+             * while we were responding the last time or while we were doing Serial output.
+             * -> Clear all bytes from receive buffer
              */
             while (Serial.available()) {
                 Serial.read();
@@ -1282,7 +1285,7 @@ bool checkAndReplyToModbusRequest() {
             /*
              * incorrect request of right length
              * I have seen 0x3E and 0xFE instead of 01 03 15 1E
-             * -> Show error, but send power anyway
+             * -> Show error
              */
             myLCD.setCursor(8, 1);
             // print first or last 4 bytes of request dependent of tBufferErrorPrintOffset
@@ -1291,10 +1294,12 @@ bool checkAndReplyToModbusRequest() {
             }
 
             sCounterForDisplayFreeze = 1440; // 12 per second => 1440 is 2 minutes
-            replyPower();
-
-            return true;
         }
+        /*
+         * Reply power always if received equal or more than MODBUS_REQUEST_LENGTH bytes and error happened
+         */
+        replyPower();
+        return true;
     }
     return false;
 }

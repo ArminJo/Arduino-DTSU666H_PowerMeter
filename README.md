@@ -7,7 +7,7 @@ On phase L1 it reads every 4. current waves, on phase L2 and L3 it reads only ev
 
 [![Badge License: GPLv3](https://img.shields.io/badge/License-GPLv3-brightgreen.svg)](https://www.gnu.org/licenses/gpl-3.0)
  &nbsp; &nbsp;
-[![Badge Version](https://img.shields.io/github/v/release/ArminJo/Arduino-DTSU666H_PowerMeter?include_prereleases&color=yellow&logo=DocuSign&logoColor=white)](https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter/releases/latest)
+[![Badge Version](https://img.shields.io/github/v/release/ArminJo/Arduino-DTSU666H_PowerMeter?color=yellow&logo=DocuSign&logoColor=white)](https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter/releases/latest)
  &nbsp; &nbsp;
 [![Badge Commits since latest](https://img.shields.io/github/commits-since/ArminJo/Arduino-DTSU666H_PowerMeter/latest?color=yellow)](https://github.com/ArminJo/Arduino-DTSU666H_PowerMeter/commits/main)
  &nbsp; &nbsp;
